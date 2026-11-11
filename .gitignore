@@ -1,0 +1,11 @@
+# build output
+/target/
+/dist/
+/release/
+
+# large downloads: AI models + ONNX Runtime / CUDA (re-create with .\fetch_ai.ps1)
+/ai_assets/
+
+# local test output
+ai_selftest.txt
+ai_selftest.png

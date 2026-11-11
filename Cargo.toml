@@ -1,0 +1,30 @@
+[package]
+name = "yolo-annotator"
+version = "0.1.0"
+edition = "2021"
+authors = ["DotoRobotics"]
+license = "MIT"
+description = "Simple mouse-driven image annotator (box / polygon / polyline) that writes Ultralytics YOLO labels"
+
+[dependencies]
+eframe = "0.29"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "tiff", "ico"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ONNX Runtime, loaded at run time from runtime\cuda or runtime\directml (API 1.24 = newest DirectML build)
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "cuda", "directml", "api-24"] }
+libloading = "0.9"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 4
+
+# Decode images fast even in debug builds
+[profile.dev.package."*"]
+opt-level = 2
