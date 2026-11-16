@@ -9,7 +9,7 @@ use annot_core::mask::{mask_to_polygon, nms};
 use image::RgbImage;
 use ort::session::Session;
 use ort::value::Tensor;
-use serde::{Deserialize, Serialize};
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,63 +21,7 @@ pub const AI_MAX_SIDE: u32 = 1280;
 const SAM_SIZE: usize = 1024;
 const EMBED_CACHE: usize = 3;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
-pub enum Engine {
-    #[default]
-    Auto,
-    Cuda,
-    DirectML,
-    Cpu,
-}
-
-impl Engine {
-    pub fn label(self) -> &'static str {
-        match self {
-            Engine::Auto => "Auto (best available)",
-            Engine::Cuda => "CUDA (NVIDIA)",
-            Engine::DirectML => "DirectML (any GPU)",
-            Engine::Cpu => "CPU",
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-#[serde(default)]
-pub struct AiSettings {
-    pub engine: Engine,
-    /// "auto" or a folder name under models\ (e.g. "sam2.1-small")
-    pub sam: String,
-    /// path of a YOLO .onnx model for auto-labelling ("" = none)
-    pub yolo: String,
-    pub conf: f32,
-    pub iou: f32,
-    /// polygon simplification tolerance (pixels of the AI image)
-    pub detail: f32,
-}
-
-impl Default for AiSettings {
-    fn default() -> Self {
-        AiSettings { engine: Engine::Auto, sam: "auto".into(), yolo: String::new(), conf: 0.35, iou: 0.6, detail: 2.5 }
-    }
-}
-
-impl AiSettings {
-    fn file() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("YOLO Annotator").join("settings.json"))
-    }
-    pub fn load() -> AiSettings {
-        Self::file()
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-    pub fn save(&self) {
-        if let Some(f) = Self::file() {
-            let _ = std::fs::create_dir_all(f.parent().unwrap());
-            let _ = std::fs::write(f, serde_json::to_string_pretty(self).unwrap_or_default());
-        }
-    }
-}
+pub use annot_core::proto::{AiResp as Resp, AiSettings, Detection, Engine};
 
 /// An image prepared for the AI: downscaled RGB + the original size.
 #[derive(Clone)]
@@ -87,13 +31,16 @@ pub struct AiImage {
     pub h: u32,
 }
 
-pub struct Detection {
-    pub class_id: usize,
-    pub class_name: Option<String>,
-    #[allow(dead_code)] // kept for a future score filter in the UI
-    pub score: f32,
-    pub bbox: [f32; 4],
-    pub polygon: Option<Vec<[f32; 2]>>,
+/// Downscaled RGB copy for the AI models (they work at 640-1024 px anyway).
+pub fn ai_image(img: &image::DynamicImage) -> AiImage {
+    let (w, h) = (img.width(), img.height());
+    let rgb = if w.max(h) > AI_MAX_SIDE { img.thumbnail(AI_MAX_SIDE, AI_MAX_SIDE).to_rgb8() } else { img.to_rgb8() };
+    AiImage { rgb: Arc::new(rgb), w, h }
+}
+
+/// Decode an image file for the AI only (batch auto-labelling).
+pub fn decode_ai(path: &Path) -> Result<AiImage, String> {
+    annot_core::imageio::decode_path(path).map(|i| ai_image(&i))
 }
 
 pub type DecodeFn = fn(&Path) -> Result<AiImage, String>;
@@ -105,24 +52,6 @@ pub enum Req {
     Detect { key: String, img: AiImage },
     /// `id` comes back in its results, so late results of an old batch can be ignored
     Batch { id: u64, items: Vec<(String, PathBuf)>, decode: DecodeFn, cancel: Arc<AtomicBool>, done: Arc<AtomicUsize> },
-}
-
-pub enum Resp {
-    /// engine / model description for the status bar
-    Ready(String),
-    /// SAM cannot be used (model missing / failed to load)
-    Unavailable(String),
-    /// the AI thread panicked; nothing more will be answered
-    Crashed,
-    Info(String),
-    Error(String),
-    Encoded { key: String, ms: u128 },
-    NeedEncode(String),
-    EncodeFailed { key: String, err: String },
-    Mask { key: String, seq: u64, shape: Option<Vec<[f32; 2]>> },
-    /// `batch`: id of the batch, None for a single Detect
-    Detected { key: String, batch: Option<u64>, dets: Vec<Detection>, w: u32, h: u32 },
-    BatchDone { id: u64, labeled: usize, errors: Vec<String>, cancelled: bool },
 }
 
 pub struct AiHandle {
@@ -916,7 +845,7 @@ fn worker(mut settings: AiSettings, rx: mpsc::Receiver<Req>, send: &dyn Fn(Resp)
                         while cache.len() > EMBED_CACHE {
                             cache.pop_front();
                         }
-                        send(Resp::Encoded { key, ms: t.elapsed().as_millis() });
+                        send(Resp::Encoded { key, ms: t.elapsed().as_millis() as u64 });
                     }
                     Err(e) => send(Resp::EncodeFailed { key, err: e }),
                 }

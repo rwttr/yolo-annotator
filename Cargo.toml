@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/ai"]
+members = ["crates/core", "crates/ai", "crates/ui"]
 resolver = "2"
 
 [workspace.package]
@@ -14,13 +14,11 @@ license = "MIT"
 description = "Simple mouse-driven image annotator (box / polygon / polyline) that writes Ultralytics YOLO labels"
 
 [dependencies]
-eframe = "0.29"
+eframe = { version = "0.29", features = ["persistence"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "tiff", "ico"] }
-rfd = "0.15"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 annot-core = { path = "crates/core" }
 annot-ai = { path = "crates/ai" }
+annot-ui = { path = "crates/ui" }
 
 [build-dependencies]
 winresource = "0.1"

@@ -1,0 +1,15 @@
+[package]
+name = "annot-ui"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "YOLO Annotator user interface (egui), shared by the desktop app and the web client"
+
+[dependencies]
+annot-core = { path = "../core" }
+eframe = { version = "0.29", features = ["persistence"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.15"

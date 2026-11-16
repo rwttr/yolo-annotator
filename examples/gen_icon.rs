@@ -1,6 +1,6 @@
-//! Regenerates assets/icon.ico (16..256 px) and assets/icon.png from src/icon.rs.
+//! Regenerates assets/icon.ico (16..256 px) and assets/icon.png from crates/ui/src/icon.rs.
 //! Run: cargo run --example gen_icon
-#[path = "../src/icon.rs"]
+#[path = "../crates/ui/src/icon.rs"]
 mod icon;
 
 use image::codecs::ico::{IcoEncoder, IcoFrame};

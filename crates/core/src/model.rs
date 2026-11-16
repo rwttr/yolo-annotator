@@ -683,7 +683,7 @@ fn split_pool(mut pool: Vec<&String>, n_val: usize, by_folder: bool) -> Vec<(&St
     out
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ExportStats {
     pub train: usize,
     pub val: usize,
