@@ -4810,6 +4810,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http",
+ "winresource",
 ]
 
 [[package]]
