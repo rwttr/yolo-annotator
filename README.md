@@ -175,6 +175,23 @@ also uses NVIDIA GPUs, a bit slower). Build without it: `.\build.ps1` (no `-Cuda
 `yolo-annotator.exe --ai-selftest photo.jpg [best.onnx] [auto|cuda|directml|cpu]` writes
 timings to `ai_selftest.txt` and the results drawn on the image to `ai_selftest.png`.
 
+## Video and frame sequences
+
+Neighbouring video frames are almost identical, so you rarely need to label each one from
+scratch. Put each video's frames in its own folder, e.g. with
+`ffmpeg -i drive01.mp4 -vf fps=3 frames/drive01/%05d.jpg` (3 frames per second is usually plenty).
+
+- **Pre-fill new frames** (right panel, *Video / frame sequence*): choose what happens when you open
+  a frame that has no labels yet. The choice is saved with the dataset and shown in the status bar.
+  - *Copy previous frame's labels*: the frame you came from (or the nearest earlier labeled frame
+    in the same folder) is copied. Press **D**, fix what moved with **Points (E)**, press **D** again.
+  - *Auto-label with YOLO model*: your model labels the frame; class names come from the model.
+  - Frames you already labeled (including ones you emptied on purpose) are never changed. Ctrl+Z undoes a pre-fill.
+- **Copy previous frame (C)**: copy labels into the current frame on demand.
+- **Export → Split by folder**: whole folders (videos) go to train or to val, so near-identical
+  frames never end up on both sides, which would make the validation scores look too good.
+  With a single folder, its last frames become val.
+
 ## Large datasets
 
 Tested with 5,000 images (1280×720, 2,500 with existing polygon labels):
@@ -231,7 +248,8 @@ out/data.yaml
 ```
 With *Keep existing train / val / test folders* (default), images inside folders named
 `train`, `val`/`valid` or `test` keep that split; others are split randomly by the validation
-fraction. Sub-folders (e.g. `night/`) are kept.
+fraction. Tick *Split by folder* for video frames (see [Video and frame sequences](#video-and-frame-sequences)).
+Sub-folders (e.g. `night/`) are kept.
 The output folder must be outside the dataset and either empty or a previous export
 (which is replaced, so no stale images remain). Export runs in the background with a progress bar.
 

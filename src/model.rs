@@ -128,6 +128,28 @@ pub enum ExportMode {
     Detect,
 }
 
+/// What happens when a frame that was never labeled is opened (video / frame sequences).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NewFrames {
+    /// nothing: the frame starts empty
+    #[default]
+    Empty,
+    /// copy the labels of the previous frame (same folder)
+    CopyPrevious,
+    /// run the user's YOLO model on it
+    AutoLabel,
+}
+
+impl NewFrames {
+    pub fn label(self) -> &'static str {
+        match self {
+            NewFrames::Empty => "Start empty",
+            NewFrames::CopyPrevious => "Copy previous frame's labels",
+            NewFrames::AutoLabel => "Auto-label with YOLO model",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Project {
@@ -135,6 +157,8 @@ pub struct Project {
     pub export_mode: ExportMode,
     /// Polylines are exported as a thin polygon of this width (pixels). 0 = zero-width (out and back).
     pub polyline_width: f32,
+    /// per dataset: how never-labeled frames are pre-filled when opened
+    pub new_frames: NewFrames,
     pub images: BTreeMap<String, ImageAnn>,
 }
 
@@ -144,6 +168,7 @@ impl Default for Project {
             classes: vec!["object".into()],
             export_mode: ExportMode::Segment,
             polyline_width: 6.0,
+            new_frames: NewFrames::Empty,
             images: BTreeMap::new(),
         }
     }
@@ -601,6 +626,63 @@ fn export_rel(rel: &str) -> String {
     keep.join("/")
 }
 
+/// Deterministic shuffle (xorshift), so re-exports give the same split.
+fn shuffle<T>(v: &mut [T]) {
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in (1..v.len()).rev() {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        v.swap(i, (s % (i as u64 + 1)) as usize);
+    }
+}
+
+fn parent_folder(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |x| x.0)
+}
+
+/// Assign `pool` to train / val with about `n_val` images in val.
+fn split_pool(mut pool: Vec<&String>, n_val: usize, by_folder: bool) -> Vec<(&String, &'static str)> {
+    let mut out = vec![];
+    if !by_folder {
+        shuffle(&mut pool);
+        for (i, f) in pool.into_iter().enumerate() {
+            out.push((f, if i < n_val { "val" } else { "train" }));
+        }
+        return out;
+    }
+    let total = pool.len();
+    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for f in pool {
+        groups.entry(parent_folder(f)).or_default().push(f);
+    }
+    if groups.len() < 2 {
+        // one sequence: a time split, the last frames are val
+        let mut v: Vec<&String> = groups.into_values().flatten().collect();
+        v.sort();
+        let cut = v.len() - n_val.min(v.len());
+        for (i, f) in v.into_iter().enumerate() {
+            out.push((f, if i >= cut { "val" } else { "train" }));
+        }
+        return out;
+    }
+    // whole folders to val until about n_val images; at least one folder stays in train
+    let mut keys: Vec<&str> = groups.keys().copied().collect();
+    shuffle(&mut keys);
+    let mut in_val = 0;
+    for k in keys {
+        let g = &groups[k];
+        let to_val = n_val > 0 && in_val < n_val && in_val + g.len() < total;
+        if to_val {
+            in_val += g.len();
+        }
+        for f in g {
+            out.push((*f, if to_val { "val" } else { "train" }));
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct ExportStats {
     pub train: usize,
@@ -612,6 +694,10 @@ pub struct ExportStats {
 /// out/images/{train,val[,test]}, out/labels/{...}, out/data.yaml
 /// `keep_split`: images inside train/val/test folders keep that split; the rest are split
 /// randomly with `val_ratio`.
+/// `by_folder`: whole folders (= videos / sequences) go to either train or val, so near-identical
+/// neighbouring frames never end up on both sides. With a single folder, the last frames
+/// (by name) become val instead.
+#[allow(clippy::too_many_arguments)]
 pub fn export_dataset(
     p: &Project,
     root: &Path,
@@ -620,6 +706,7 @@ pub fn export_dataset(
     val_ratio: f32,
     include_unlabeled: bool,
     keep_split: bool,
+    by_folder: bool,
     progress: &dyn Fn(usize, usize),
 ) -> Result<ExportStats, String> {
     if out.as_os_str().is_empty() {
@@ -650,21 +737,11 @@ pub fn export_dataset(
             None => pool.push(f),
         }
     }
-    // deterministic shuffle (xorshift) so re-exports give the same split
-    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
-    for i in (1..pool.len()).rev() {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        pool.swap(i, (s % (i as u64 + 1)) as usize);
-    }
     let mut n_val = (pool.len() as f32 * val_ratio).round() as usize;
     if val_ratio > 0.0 && n_val == 0 && pool.len() > 1 {
         n_val = 1;
     }
-    for (i, f) in pool.into_iter().enumerate() {
-        assigned.push((f, if i < n_val { "val" } else { "train" }));
-    }
+    assigned.extend(split_pool(pool, n_val, by_folder));
 
     let mut stats = ExportStats::default();
     let mut used = std::collections::HashSet::new();
@@ -843,6 +920,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn split_by_folder_keeps_sequences_together() {
+        let files: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .flat_map(|v| (0..10).map(move |i| format!("{v}/f{i:03}.jpg")))
+            .collect();
+        let pool: Vec<&String> = files.iter().collect();
+        let out = split_pool(pool, 10, true);
+        assert_eq!(out.len(), 40);
+        for v in ["a", "b", "c", "d"] {
+            let splits: std::collections::HashSet<_> =
+                out.iter().filter(|(f, _)| f.starts_with(v)).map(|x| x.1).collect();
+            assert_eq!(splits.len(), 1, "folder {v} was split across train and val");
+        }
+        let n_val = out.iter().filter(|x| x.1 == "val").count();
+        assert!(n_val > 0 && n_val < 40);
+
+        // a single sequence: the last frames are val
+        let one: Vec<String> = (0..10).map(|i| format!("v/f{i:03}.jpg")).collect();
+        let out = split_pool(one.iter().collect(), 2, true);
+        let val: Vec<&str> = out.iter().filter(|x| x.1 == "val").map(|x| x.0.as_str()).collect();
+        assert_eq!(val, ["v/f008.jpg", "v/f009.jpg"]);
+    }
+
+    #[test]
     fn roundtrip_box_and_polygon() {
         let ann = ImageAnn {
             width: 200,
@@ -904,14 +1005,14 @@ mod tests {
         }
         files.push("unlabeled.jpg".into());
         let out = root.join("out");
-        let st = export_dataset(&p, &img_dir, &files, &out, 0.2, false, true, &|_, _| {}).unwrap();
+        let st = export_dataset(&p, &img_dir, &files, &out, 0.2, false, true, false, &|_, _| {}).unwrap();
         assert_eq!((st.train, st.val), (4, 1));
         assert_eq!(fs::read_dir(out.join("labels/train")).unwrap().count(), 4);
         let yaml = fs::read_to_string(out.join("data.yaml")).unwrap();
         assert!(yaml.contains("val: images/val") && yaml.contains("0: 'object'"));
         assert!(!yaml.contains(r"\\?\"), "verbatim prefix leaked into data.yaml: {yaml}");
         // refuse an output folder inside the dataset
-        assert!(export_dataset(&p, &img_dir, &files, &img_dir.join("x"), 0.2, false, true, &|_, _| {}).is_err());
+        assert!(export_dataset(&p, &img_dir, &files, &img_dir.join("x"), 0.2, false, true, false, &|_, _| {}).is_err());
         assert!(is_inside(Path::new(r"C:\A\b\c"), Path::new(r"c:\a\B")));
         assert!(!is_inside(Path::new(r"C:\A\bc"), Path::new(r"C:\A\b")));
         fs::remove_dir_all(&root).unwrap();
@@ -940,7 +1041,7 @@ mod tests {
         }
         let out = std::env::temp_dir().join(format!("yolo_annot_ds_out_{}", std::process::id()));
         let _ = fs::remove_dir_all(&out);
-        let st = export_dataset(&p, &root, &files, &out, 0.5, false, true, &|_, _| {}).unwrap();
+        let st = export_dataset(&p, &root, &files, &out, 0.5, false, true, false, &|_, _| {}).unwrap();
         assert_eq!(st, ExportStats { train: 2, val: 1, test: 0 });
         assert!(out.join("images/val/sub/a.jpg").exists());
         assert!(out.join("labels/val/sub/a.txt").exists());
@@ -971,18 +1072,18 @@ mod tests {
             p.images.insert(f.clone(), ImageAnn { width: 10, height: 10, shapes: vec![] });
         }
         let out = root.join("out");
-        export_dataset(&p, &ds, &files, &out, 0.0, false, true, &|_, _| {}).unwrap();
+        export_dataset(&p, &ds, &files, &out, 0.0, false, true, false, &|_, _| {}).unwrap();
         let n = fs::read_dir(out.join("labels/train")).unwrap().count();
         assert_eq!(n, 2, "a.jpg and a.png must get separate label files");
         // re-export replaces the previous export
         fs::write(out.join("images/train/stale.jpg"), b"x").unwrap();
-        export_dataset(&p, &ds, &files, &out, 0.0, false, true, &|_, _| {}).unwrap();
+        export_dataset(&p, &ds, &files, &out, 0.0, false, true, false, &|_, _| {}).unwrap();
         assert!(!out.join("images/train/stale.jpg").exists());
         // a foreign non-empty folder is refused
         let other = root.join("other");
         fs::create_dir_all(&other).unwrap();
         fs::write(other.join("keep.txt"), b"x").unwrap();
-        assert!(export_dataset(&p, &ds, &files, &other, 0.0, false, true, &|_, _| {}).is_err());
+        assert!(export_dataset(&p, &ds, &files, &other, 0.0, false, true, false, &|_, _| {}).is_err());
         assert!(other.join("keep.txt").exists());
         fs::remove_dir_all(&root).unwrap();
     }

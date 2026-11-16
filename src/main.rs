@@ -285,6 +285,8 @@ struct ExportDlg {
     val_ratio: f32,
     include_unlabeled: bool,
     keep_split: bool,
+    /// keep each folder (video / sequence) entirely in train or in val
+    by_folder: bool,
 }
 
 /// Folder tree of the dataset, for the navigation pane.
@@ -510,6 +512,7 @@ impl App {
                 val_ratio: 0.2,
                 include_unlabeled: false,
                 keep_split: true,
+                by_folder: false,
             },
             cursor_img: None,
             scroll_list: false,
@@ -831,6 +834,8 @@ impl App {
         if idx >= self.files.len() {
             return;
         }
+        // the frame being left: the first choice to copy labels from
+        let left = self.loaded.as_ref().map(|l| l.name.clone());
         // keep a polygon / polyline that is still being drawn, and a Magic result
         if !self.drawing.is_empty() {
             self.finish_drawing();
@@ -882,6 +887,9 @@ impl App {
                 self.loaded = Some(Loaded { name, tex, w, h, ai: ai_img });
                 if self.tool == Tool::Magic {
                     self.request_encode();
+                }
+                if !self.project.images.contains_key(&self.files[idx]) {
+                    self.prefill_new_frame(idx, left.as_deref());
                 }
             }
             Err(e) => {
@@ -990,6 +998,78 @@ impl App {
                 let name = l.name.clone();
                 self.stale.insert(name); // try again at the next save
             }
+        }
+    }
+
+    /// A never-labeled frame was opened: fill it as chosen under "Video / frame sequence".
+    fn prefill_new_frame(&mut self, idx: usize, left: Option<&str>) {
+        match self.project.new_frames {
+            NewFrames::Empty => {}
+            NewFrames::CopyPrevious => {
+                if let Some(src) = self.copy_source(idx, left, false) {
+                    let n = self.copy_from(&src);
+                    self.status = format!("New frame: {n} shapes copied from {src}. Fix them with Points (E); Ctrl+Z undoes.");
+                }
+            }
+            NewFrames::AutoLabel => {
+                if self.ai_settings.yolo.trim().is_empty() {
+                    self.status = "New frames: choose your YOLO model under 'AI assist' to auto-label them.".into();
+                } else {
+                    self.auto_label();
+                }
+            }
+        }
+    }
+
+    /// Frame to copy labels from: `left` (the frame just left) if it is in the same folder and
+    /// has shapes, else the nearest such frame before `idx` (then after it, if `both_ways`).
+    fn copy_source(&self, idx: usize, left: Option<&str>, both_ways: bool) -> Option<String> {
+        let name = self.files.get(idx)?;
+        let folder = |n: &str| n.rsplit_once('/').map_or("", |x| x.0).to_string();
+        let here = folder(name);
+        let ok = |n: &str| {
+            n != name
+                && folder(n) == here
+                && self.project.images.get(n).is_some_and(|a| !a.shapes.is_empty())
+        };
+        if let Some(l) = left.filter(|l| ok(l)) {
+            return Some(l.to_string());
+        }
+        let near = |it: &mut dyn Iterator<Item = usize>| it.map(|i| &self.files[i]).find(|n| ok(n)).cloned();
+        near(&mut (0..idx).rev()).or_else(|| if both_ways { near(&mut (idx + 1..self.files.len())) } else { None })
+    }
+
+    /// Replace the current frame's shapes with those of `src` (scaled if the size differs).
+    fn copy_from(&mut self, src: &str) -> usize {
+        let Some(l) = &self.loaded else { return 0 };
+        let (name, w, h) = (l.name.clone(), l.w, l.h);
+        let Some(a) = self.project.images.get(src) else { return 0 };
+        let (sx, sy) = (w as f32 / a.width.max(1) as f32, h as f32 / a.height.max(1) as f32);
+        let shapes: Vec<Annot> = a
+            .shapes
+            .iter()
+            .map(|s| Annot { pts: s.pts.iter().map(|p| [p[0] * sx, p[1] * sy]).collect(), ..s.clone() })
+            .collect();
+        let n = shapes.len();
+        self.push_undo();
+        self.project.images.insert(name, ImageAnn { width: w, height: h, shapes });
+        self.selected = None;
+        self.sel_point = None;
+        self.touch();
+        n
+    }
+
+    /// "Copy previous frame" (C): the nearest labeled frame before this one (else after), same folder.
+    fn copy_previous(&mut self) {
+        if self.loaded.is_none() {
+            return;
+        }
+        match self.copy_source(self.cur, None, true) {
+            Some(src) => {
+                let n = self.copy_from(&src);
+                self.status = format!("{n} shapes copied from {src} (Ctrl+Z to undo).");
+            }
+            None => self.status = "No labeled frame in this folder to copy from.".into(),
         }
     }
 
@@ -1746,11 +1826,12 @@ impl App {
                     p(Key::M),
                     p(Key::I) || p(Key::Insert),
                     p(Key::E),
+                    p(Key::C),
                 ],
                 NUMS.iter().position(|k| p(*k)),
             )
         });
-        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg, ins, ek] = k;
+        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg, ins, ek, cp] = k;
         if mg {
             self.set_tool(Tool::Magic);
         }
@@ -1783,6 +1864,9 @@ impl App {
         }
         if ek {
             self.set_tool(Tool::Points);
+        }
+        if cp {
+            self.copy_previous();
         }
         if b {
             self.set_tool(Tool::BBox);
@@ -2539,6 +2623,15 @@ impl App {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 self.save_indicator(ui);
+                if self.dir.is_some() && self.project.new_frames != NewFrames::Empty {
+                    let t = match self.project.new_frames {
+                        NewFrames::CopyPrevious => "⏩ New frames: copy previous",
+                        _ => "⏩ New frames: auto-label",
+                    };
+                    ui.label(egui::RichText::new(t).color(Color32::from_rgb(120, 180, 255)))
+                        .on_hover_text("Frames with no labels are pre-filled when opened. Change it under 'Video / frame sequence' (right panel).");
+                    ui.separator();
+                }
                 if let Some(l) = &self.loaded {
                     ui.label(format!(
                         "{}/{}  {}  {}×{}  zoom {:.0}%",
@@ -2840,6 +2933,8 @@ impl App {
                     ui.checkbox(&mut self.show_labels, "Show class names on image");
 
                     ui.separator();
+                    self.video_panel(ui);
+                    ui.separator();
                     self.ai_panel(ui);
 
                     ui.separator();
@@ -2852,6 +2947,7 @@ impl App {
                              • Polyline: click points, double/right-click to finish\n\
                              • Select: click inside a shape to select it, or click a point to select just that point (amber); Del deletes the point if one is selected, otherwise the whole shape\n\
                              • Points (E): edit the points of the selected polygon / polyline: click or drag an edge to add a point, right-click a point (or hover + Backspace) to remove it, drop a point onto its neighbour to merge the two\n\
+                             • Video frames: under 'Video / frame sequence' (right panel), new frames can be pre-filled with the previous frame's labels or by your YOLO model; C copies the previous frame's labels. Export: 'Split by folder' keeps each video in train or in val\n\
                              • In the drawing tools the shape you just drew stays selected: drag its handles (box corners or edge midpoints) or its centre grip to adjust. Box tool: click a shape to select it; Polygon / Polyline: right-click a shape. Del deletes the selection, Esc deselects\n\n\
                              Keys\n\
                              V/B/P/L tools · Q toggle Selector ↔ last annotation tool · A/D or ←/→ prev/next image · 1-9 class · Del delete · Ctrl+Z undo · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
@@ -2861,6 +2957,37 @@ impl App {
                     });
                 });
             });
+    }
+
+    fn video_panel(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Video / frame sequence").default_open(true).show(ui, |ui| {
+            ui.label("When a frame with no labels is opened:");
+            let before = self.project.new_frames;
+            egui::ComboBox::from_id_salt("new_frames")
+                .selected_text(before.label())
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for m in [NewFrames::Empty, NewFrames::CopyPrevious, NewFrames::AutoLabel] {
+                        ui.selectable_value(&mut self.project.new_frames, m, m.label());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Copy: takes the labels of the frame you came from (or the nearest labeled frame in the same folder). Fix them with Points (E).\n\
+                     Auto-label: runs your YOLO model (set under AI assist); class names come from the model.\n\
+                     Only frames that were never labeled are filled. Ctrl+Z undoes. Saved with this dataset.",
+                );
+            if self.project.new_frames != before {
+                self.dirty = true;
+            }
+            if ui
+                .add_enabled(self.loaded.is_some(), egui::Button::new("Copy previous frame (C)"))
+                .on_hover_text("Replace this frame's labels with those of the nearest labeled frame in the same folder (before it, else after it). Ctrl+Z undoes.")
+                .clicked()
+            {
+                self.copy_previous();
+            }
+        });
     }
 
     fn ai_panel(&mut self, ui: &mut egui::Ui) {
@@ -3027,9 +3154,11 @@ impl App {
                     ),
                 )
                 .on_hover_text("Images inside folders named train, val/valid or test keep that split. Other images are split randomly.");
+                ui.checkbox(&mut self.export.by_folder, "Split by folder (keep each video / sequence together)")
+                    .on_hover_text("For video frames: whole folders go to train or to val, so almost identical neighbouring frames are never on both sides (that would make the val scores look too good).\nWith a single folder, its last frames become val.\nPut each video's frames in its own folder.");
                 ui.add(
                     egui::Slider::new(&mut self.export.val_ratio, 0.0..=0.5)
-                        .text("validation fraction (random split)"),
+                        .text("validation fraction"),
                 );
                 ui.checkbox(
                     &mut self.export.include_unlabeled,
@@ -3056,10 +3185,11 @@ impl App {
                 let out = PathBuf::from(self.export.out.trim());
                 // copying thousands of images takes a while: do it off the UI thread
                 let (project, files) = (self.project.clone(), self.files.clone());
-                let (vr, inc, keep) = (
+                let (vr, inc, keep, by_folder) = (
                     self.export.val_ratio,
                     self.export.include_unlabeled,
                     self.export.keep_split,
+                    self.export.by_folder,
                 );
                 let done = Arc::new(AtomicUsize::new(0));
                 let total = Arc::new(AtomicUsize::new(0));
@@ -3068,7 +3198,7 @@ impl App {
                 let out2 = out.clone();
                 let ctx2 = ctx.clone();
                 std::thread::spawn(move || {
-                    let res = export_dataset(&project, &dir, &files, &out2, vr, inc, keep, &|k, n| {
+                    let res = export_dataset(&project, &dir, &files, &out2, vr, inc, keep, by_folder, &|k, n| {
                         d2.store(k, Ordering::Relaxed);
                         t2.store(n, Ordering::Relaxed);
                     });
