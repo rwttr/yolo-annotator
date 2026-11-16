@@ -1,0 +1,10 @@
+[package]
+name = "annot-core"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "YOLO Annotator core: annotation model, YOLO label files, dataset export, mask to polygon"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -162,6 +162,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "annot-ai"
+version = "0.3.1"
+dependencies = [
+ "annot-core",
+ "image",
+ "libloading 0.9.0",
+ "ort",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "annot-core"
+version = "0.3.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4198,10 +4218,10 @@ dependencies = [
 name = "yolo-annotator"
 version = "0.3.1"
 dependencies = [
+ "annot-ai",
+ "annot-core",
  "eframe",
  "image",
- "libloading 0.9.0",
- "ort",
  "rfd",
  "serde",
  "serde_json",

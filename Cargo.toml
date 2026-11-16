@@ -1,6 +1,13 @@
+[workspace]
+members = ["crates/core", "crates/ai"]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.1"
+
 [package]
 name = "yolo-annotator"
-version = "0.3.1"
+version.workspace = true
 edition = "2021"
 authors = ["DotoRobotics"]
 license = "MIT"
@@ -12,9 +19,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# ONNX Runtime, loaded at run time from runtime\cuda or runtime\directml (API 1.24 = newest DirectML build)
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "cuda", "directml", "api-24"] }
-libloading = "0.9"
+annot-core = { path = "crates/core" }
+annot-ai = { path = "crates/ai" }
 
 [build-dependencies]
 winresource = "0.1"

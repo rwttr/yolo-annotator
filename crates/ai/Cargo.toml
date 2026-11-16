@@ -1,0 +1,15 @@
+[package]
+name = "annot-ai"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "YOLO Annotator AI worker: SAM 2.1 (Magic tool) and YOLO auto-labelling via ONNX Runtime"
+
+[dependencies]
+annot-core = { path = "../core" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "tiff", "ico"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ONNX Runtime, loaded at run time from runtime\cuda or runtime\directml (API 1.24 = newest DirectML build)
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "cuda", "directml", "api-24"] }
+libloading = "0.9"

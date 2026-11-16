@@ -5,7 +5,7 @@
 //! ONNX Runtime is loaded at run time from `runtime\cuda` or `runtime\directml` next to the
 //! exe (or `ai_assets\` while developing), so the app still starts without them.
 
-use crate::mask::{mask_to_polygon, nms};
+use annot_core::mask::{mask_to_polygon, nms};
 use image::RgbImage;
 use ort::session::Session;
 use ort::value::Tensor;

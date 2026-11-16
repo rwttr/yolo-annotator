@@ -1,16 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod ai;
+use annot_ai as ai;
 mod icon;
-mod mask;
-mod model;
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
     Stroke, Vec2,
 };
 use image::ImageDecoder;
-use model::*;
+use annot_core::model::*;
 use std::fs;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
