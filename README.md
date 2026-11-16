@@ -9,6 +9,10 @@ A small, standalone Windows image annotator written in Rust (egui). It labels
 It includes AI assist: click an object to get its polygon (SAM 2.1), or pre-label images with
 your own YOLO model (see [AI assist](#ai-assist)).
 
+![Lane annotation in YOLO Annotator: two lane polygons and three lane-line polylines; the right lane is selected](assets/screenshot-select.jpg)
+*Lane segmentation: lane areas as polygons, lane markings as polylines. The selected lane is
+highlighted with its handles; the status bar shows the save state and the new-frame mode.*
+
 ## Install
 
 **Requirements:** 64-bit Windows 10 or 11. Nothing else needs to be installed: the AI engine,
@@ -86,6 +90,10 @@ dataset folder (`labels\`, `annotations.json`), never into the program folder.
    | **Points (E)** | edit the points of the selected polygon / polyline (e.g. a Magic result): click or drag an edge to add a point (a **+** marks where), right-click a point (red ring) or hover + Backspace to remove it, drag a point to move it, drop a point onto its neighbour to merge the two; click another shape to edit that one |
    | **Magic (M)** | AI (SAM 2.1): click an object, or drag a box around it, to get its polygon; Enter or double-click accepts it |
 
+   ![Points tool: a selected point (amber) and the + marker where a click adds a point](assets/screenshot-points.jpg)
+   *Points tool (E): the amber dot is the selected point (Del removes it); the **+** on the
+   edge shows where a click adds a point.*
+
    **Editing without switching tools:** a shape you just drew stays selected. Drag its
    handles (box corners or edge midpoints, polygon points) to resize, or the round centre grip
    to move it. In the Box tool, click a shape to select it; in Polygon/Polyline, right-click it.
@@ -95,7 +103,8 @@ dataset folder (`labels\`, `annotations.json`), never into the program folder.
    is written as soon as you finish each edit (the status bar shows the file). No Save needed.
 5. When done: **Export** (Ctrl+E) makes a train/val split ready for training.
 
-The top bar, left to right: **Open · Save · Export** | the toolbox | **◀ ▶** previous/next image, **Fit**, **Undo**, **Auto** (auto-label) | format and polyline width | **ⓘ About**. Hover any button for its name and shortcut.
+The top bar, left to right: **Open · Save · Export** | the toolbox | **◀ ▶** previous/next image, **Fit**, **Undo**, **Auto** (auto-label) | label format and polyline width. Hover any button for its name and shortcut.
+**About** is under **Help** in the right panel.
 
 Mouse wheel zooms around the cursor. Middle-drag or Space+drag pans; in Select mode
 you can also drag an empty area to pan. Keys 1–9 pick the class (and recolor the

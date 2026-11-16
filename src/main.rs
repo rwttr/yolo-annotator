@@ -655,7 +655,7 @@ impl App {
             .count();
         self.status = warn.unwrap_or_else(|| {
             format!(
-                "Opened {} images in {} ({} labeled{}). Label files are created next to each image folder (images → labels).",
+                "Opened {} images in {} ({} labeled{}). Label files are created next to each image folder (images -> labels).",
                 self.files.len(),
                 dir.display(),
                 labeled,
@@ -989,7 +989,7 @@ impl App {
         match write_label_file(dir, &l.name, a, &self.project) {
             Ok(p) => {
                 let shown = p.strip_prefix(dir).unwrap_or(&p).display().to_string();
-                self.status = format!("✔ {} objects → {shown}", a.shapes.len());
+                self.status = format!("✔ {} objects -> {shown}", a.shapes.len());
                 self.label_error = None;
             }
             Err(e) => {
@@ -2484,10 +2484,10 @@ impl App {
                 ui.separator();
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let has_img = self.loaded.is_some();
-                if act_button(ui, Act::Prev, "", has).on_hover_text("Previous image (A or ←)").clicked() {
+                if act_button(ui, Act::Prev, "", has).on_hover_text("Previous image (A or Left arrow)").clicked() {
                     self.goto(ctx, -1);
                 }
-                if act_button(ui, Act::Next, "", has).on_hover_text("Next image (D or →)").clicked() {
+                if act_button(ui, Act::Next, "", has).on_hover_text("Next image (D or Right arrow)").clicked() {
                     self.goto(ctx, 1);
                 }
                 if act_button(ui, Act::Fit, "", has_img).on_hover_text("Fit image to window (F)").clicked() {
@@ -2504,12 +2504,11 @@ impl App {
                 }
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.separator();
-                ui.label("Format:");
                 let before = self.project.export_mode;
                 egui::ComboBox::from_id_salt("mode")
                     .selected_text(match self.project.export_mode {
-                        ExportMode::Segment => "Segmentation",
-                        ExportMode::Detect => "Detection",
+                        ExportMode::Segment => "Segment",
+                        ExportMode::Detect => "Detect",
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
@@ -2522,7 +2521,9 @@ impl App {
                             ExportMode::Detect,
                             "Detection (boxes)",
                         );
-                    });
+                    })
+                    .response
+                    .on_hover_text("YOLO label format: Segmentation (polygons) or Detection (boxes)");
                 if before != self.project.export_mode {
                     self.labels_stale = true; // every label file changes format
                     self.touch();
@@ -2545,10 +2546,6 @@ impl App {
                         }
                     }
                     self.touch();
-                }
-                ui.separator();
-                if act_button(ui, Act::About, "", true).on_hover_text("About YOLO Annotator").clicked() {
-                    self.about_open = true;
                 }
             });
             ui.add_space(3.0);
@@ -2939,6 +2936,9 @@ impl App {
 
                     ui.separator();
                     egui::CollapsingHeader::new("Help").default_open(false).show(ui, |ui| {
+                        if ui.button("ⓘ About YOLO Annotator").clicked() {
+                            self.about_open = true;
+                        }
                         ui.label(
                             "Mouse\n\
                              • Wheel: zoom   • Middle-drag / Space+drag: pan\n\
@@ -2950,9 +2950,9 @@ impl App {
                              • Video frames: under 'Video / frame sequence' (right panel), new frames can be pre-filled with the previous frame's labels or by your YOLO model; C copies the previous frame's labels. Export: 'Split by folder' keeps each video in train or in val\n\
                              • In the drawing tools the shape you just drew stays selected: drag its handles (box corners or edge midpoints) or its centre grip to adjust. Box tool: click a shape to select it; Polygon / Polyline: right-click a shape. Del deletes the selection, Esc deselects\n\n\
                              Keys\n\
-                             V/B/P/L tools · Q toggle Selector ↔ last annotation tool · A/D or ←/→ prev/next image · 1-9 class · Del delete · Ctrl+Z undo · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
+                             V/B/P/L tools · Q toggle Selector <-> last annotation tool · A/D or Left/Right arrows prev/next image · 1-9 class · Del delete · Ctrl+Z undo · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
                              Saving\n\
-                             Everything autosaves to annotations.json in the image folder, and YOLO .txt files are written to the 'labels' folder next to it (images → labels). Use 'Export...' to build a train/val split with data.yaml.",
+                             Everything autosaves to annotations.json in the image folder, and YOLO .txt files are written to the 'labels' folder next to it (images -> labels). Use 'Export...' to build a train/val split with data.yaml.",
                         );
                     });
                 });
@@ -3345,7 +3345,6 @@ enum Act {
     Fit,
     Undo,
     Auto,
-    About,
 }
 
 /// Top-bar action button: drawn icon (+ optional label). Shortcuts are in the tooltip.
@@ -3458,11 +3457,6 @@ fn draw_act_icon(p: &egui::Painter, r: Rect, act: Act, c: Color32) {
                 2.5,
             ));
             sparkle(p, pt(0.74, 0.26), r.width() * 0.22, c);
-        }
-        Act::About => {
-            p.circle_stroke(r.center(), r.width() * 0.4, st);
-            p.circle_filled(pt(0.5, 0.3), 1.8, c);
-            line(vec![pt(0.5, 0.44), pt(0.5, 0.74)]);
         }
     }
 }
@@ -3697,13 +3691,71 @@ fn draw_annot(
         }
     }
     if show_label {
-        let b = s.bounds();
-        let anchor = to_s([b[0], b[1]]);
         let galley = p.layout_no_wrap(label.to_string(), FontId::proportional(12.0), Color32::BLACK);
         let size = galley.size() + Vec2::new(6.0, 2.0);
-        let r = Rect::from_min_size(anchor - Vec2::new(0.0, size.y), size);
+        let r = match label_anchor(s, tri) {
+            // box: tag sits on its top-left corner
+            None => {
+                let b = s.bounds();
+                Rect::from_min_size(to_s([b[0], b[1]]) - Vec2::new(0.0, size.y), size)
+            }
+            // polygon / polyline: tag centred on the shape itself
+            Some(a) => Rect::from_center_size(to_s(a), size),
+        };
         p.rect_filled(r, 2.0, c);
         p.galley(r.min + Vec2::new(3.0, 1.0), galley, Color32::BLACK);
+    }
+}
+
+/// Where the class tag of a polygon / polyline goes (image coordinates); None = box.
+/// Polyline: halfway along its length. Polygon: the area centroid if it lies inside,
+/// else the centre of the largest triangle of its triangulation (always inside).
+fn label_anchor(s: &Annot, tri: &[u32]) -> Option<[f32; 2]> {
+    let pts = &s.pts;
+    match s.kind {
+        Kind::BBox => None,
+        Kind::Polyline => {
+            let len: f32 = pts.windows(2).map(|w| dist(w[0], w[1])).sum();
+            let mut left = len / 2.0;
+            for w in pts.windows(2) {
+                let d = dist(w[0], w[1]);
+                if d >= left && d > 0.0 {
+                    let t = left / d;
+                    return Some([w[0][0] + t * (w[1][0] - w[0][0]), w[0][1] + t * (w[1][1] - w[0][1])]);
+                }
+                left -= d;
+            }
+            pts.first().copied()
+        }
+        Kind::Polygon => {
+            let n = pts.len();
+            let (mut a2, mut cx, mut cy) = (0.0f32, 0.0f32, 0.0f32);
+            for i in 0..n {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                let c = p[0] * q[1] - q[0] * p[1];
+                a2 += c;
+                cx += (p[0] + q[0]) * c;
+                cy += (p[1] + q[1]) * c;
+            }
+            if a2.abs() > 1e-6 {
+                let c = [cx / (3.0 * a2), cy / (3.0 * a2)];
+                if point_in_polygon(c, pts) {
+                    return Some(c);
+                }
+            }
+            let tri_area = |t: &[u32]| {
+                let [a, b, c] = [pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]];
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            };
+            tri.chunks_exact(3)
+                .filter(|t| t.iter().all(|i| (*i as usize) < n))
+                .max_by(|x, y| tri_area(x).total_cmp(&tri_area(y)))
+                .map(|t| {
+                    let [a, b, c] = [pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]];
+                    [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0]
+                })
+                .or_else(|| pts.first().copied())
+        }
     }
 }
 
@@ -3756,5 +3808,44 @@ impl eframe::App for App {
             self.accept_magic();
             self.save_current(false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tri_tests {
+    use super::*;
+
+    #[test]
+    fn triangulates_polygon_with_collinear_points() {
+        let p = |v: &[[f32; 2]]| v.iter().map(|q| Pos2::new(q[0], q[1])).collect::<Vec<_>>();
+        for poly in [
+            p(&[[0., 478.], [300., 350.], [590., 226.], [633., 218.], [510., 470.], [388., 720.], [0., 720.]]),
+            p(&[[633., 218.], [697., 222.], [990., 348.], [1280., 472.], [1280., 720.], [388., 720.], [510., 470.]]),
+        ] {
+            let t = triangulate(&poly);
+            assert_eq!(t.len(), (poly.len() - 2) * 3, "triangles: {t:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn tags_sit_on_the_shape() {
+        let line = Annot { class: 0, kind: Kind::Polyline, pts: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]] };
+        assert_eq!(label_anchor(&line, &[]), Some([10.0, 0.0]));
+        // concave "U": the centroid is in the notch, so the tag goes into a triangle instead
+        let u = Annot {
+            class: 0,
+            kind: Kind::Polygon,
+            pts: vec![[0.0, 0.0], [3.0, 0.0], [3.0, 8.0], [7.0, 8.0], [7.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+        };
+        let ip: Vec<Pos2> = u.pts.iter().map(|q| Pos2::new(q[0], q[1])).collect();
+        let a = label_anchor(&u, &triangulate(&ip)).unwrap();
+        assert!(point_in_polygon(a, &u.pts), "{a:?}");
+        let b = Annot { class: 0, kind: Kind::BBox, pts: vec![[0.0, 0.0], [5.0, 5.0]] };
+        assert_eq!(label_anchor(&b, &[]), None);
     }
 }

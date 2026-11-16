@@ -1,6 +1,8 @@
 # Makes the release packages in .\release from .\dist (run .\build.ps1 -Cuda first):
 #   YOLO-Annotator-<ver>-win64.zip        portable: unzip anywhere, run yolo-annotator.exe
 #   YOLO-Annotator-<ver>-cuda-addon.zip   optional NVIDIA CUDA pack: unzip over the app folder
+#                                         (only made when the CUDA pack changed: an unchanged
+#                                         pack keeps using the existing add-on zip, any version)
 #   .\package.ps1 [-NoCuda]
 param([switch]$NoCuda)
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,28 @@ Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $rel | Out-Null
 
 if (-not (Test-Path dist\yolo-annotator.exe)) { throw "dist\yolo-annotator.exe missing: run .\build.ps1 first" }
+
+# ---- CUDA add-on: rebuilt only when dist\runtime\cuda differs from the last packaged one.
+# release\cuda-addon.sig holds the content signature and the name of the zip that has it.
+$hasCuda = -not $NoCuda -and (Test-Path dist\runtime\cuda)
+$sigFile = Join-Path $rel "cuda-addon.sig"
+$cudaZip = "$name-cuda-addon.zip"
+$cudaBuild = $false
+if ($hasCuda) {
+    $root = (Resolve-Path dist\runtime\cuda).Path
+    $lines = Get-ChildItem $root -Recurse -File | Sort-Object FullName | ForEach-Object {
+        "{0}|{1}|{2}" -f $_.FullName.Substring($root.Length), $_.Length, (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $sig = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))).Replace("-", "")
+    $old = if (Test-Path $sigFile) { @(Get-Content $sigFile) } else { @() }
+    if ($old.Count -ge 2 -and $old[0] -eq $sig -and (Test-Path (Join-Path $rel $old[1]))) {
+        $cudaZip = $old[1]
+        Write-Host "CUDA pack unchanged: keeping $cudaZip (no new add-on zip)"
+    } else {
+        $cudaBuild = $true
+    }
+}
 
 # ---- standard edition (everything except the CUDA pack)
 $app = Join-Path $stage "YOLO Annotator"
@@ -36,7 +60,7 @@ YOLO Annotator $ver - portable
 
 AI tools (Magic tool, Auto-label) use the 'models' and 'runtime' folders next to the exe.
 They work on any Windows 10/11 PC (GPU via DirectML, or CPU).
-NVIDIA PC? Unzip $name-cuda-addon.zip into this same folder for the faster CUDA engine.
+NVIDIA PC? Unzip $cudaZip into this same folder for the faster CUDA engine.
 
 See README.md for how to use it.  Copyright (c) 2026 DotoRobotics, MIT License (LICENSE).
 "@ | Set-Content "$app\READ ME FIRST.txt" -Encoding utf8
@@ -51,13 +75,14 @@ function New-Zip($srcDir, $zip) {
 New-Zip $stage (Join-Path $rel "$name-win64.zip")
 
 # ---- CUDA add-on (same folder layout, so it unzips over the app folder)
-if (-not $NoCuda -and (Test-Path dist\runtime\cuda)) {
+if ($cudaBuild) {
     $cstage = Join-Path $rel "_stage_cuda"
     Remove-Item $cstage -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force "$cstage\YOLO Annotator\runtime" | Out-Null
     Copy-Item dist\runtime\cuda "$cstage\YOLO Annotator\runtime\cuda" -Recurse
-    New-Zip $cstage (Join-Path $rel "$name-cuda-addon.zip")
+    New-Zip $cstage (Join-Path $rel $cudaZip)
     Remove-Item $cstage -Recurse -Force
+    Set-Content $sigFile @($sig, $cudaZip) -Encoding ascii
 }
 
 Remove-Item $stage -Recurse -Force
