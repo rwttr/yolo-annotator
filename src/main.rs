@@ -413,6 +413,10 @@ struct App {
     dirty: bool,
     labels_stale: bool,
     last_save: f64,
+    /// last failure of the periodic / forced save (None after a clean save)
+    save_error: Option<String>,
+    /// last failure writing the current image's label file
+    label_error: Option<String>,
     status: String,
     export: ExportDlg,
     cursor_img: Option<[f32; 2]>,
@@ -478,6 +482,8 @@ impl App {
             dirty: false,
             labels_stale: false,
             last_save: 0.0,
+            save_error: None,
+            label_error: None,
             status: "Open an image folder to start.".into(),
             export: ExportDlg {
                 open: false,
@@ -940,6 +946,7 @@ impl App {
             errs.push(e);
         }
         self.dirty = false;
+        self.save_error = (!errs.is_empty()).then(|| errs.join("; "));
         if !errs.is_empty() {
             self.status = format!("Save error: {}", errs.join("; "));
         } else if force {
@@ -952,13 +959,19 @@ impl App {
         self.label_dirty = false;
         let (Some(dir), Some(l)) = (&self.dir, &self.loaded) else { return };
         let Some(a) = self.project.images.get(&l.name) else { return };
-        self.status = match write_label_file(dir, &l.name, a, &self.project) {
+        match write_label_file(dir, &l.name, a, &self.project) {
             Ok(p) => {
                 let shown = p.strip_prefix(dir).unwrap_or(&p).display().to_string();
-                format!("✔ {} objects → {shown}", a.shapes.len())
+                self.status = format!("✔ {} objects → {shown}", a.shapes.len());
+                self.label_error = None;
             }
-            Err(e) => format!("Save error: {e}"),
-        };
+            Err(e) => {
+                self.status = format!("Save error: {e}");
+                self.label_error = Some(e);
+                let name = l.name.clone();
+                self.stale.insert(name); // try again at the next save
+            }
+        }
     }
 
     /// Mark the current image as changed (label file + project file).
@@ -2290,9 +2303,32 @@ impl App {
             });
     }
 
+    /// Saved / unsaved / failed badge at the start of the status bar.
+    fn save_indicator(&self, ui: &mut egui::Ui) {
+        let Some(dir) = &self.dir else { return };
+        let (text, color, tip) = if let Some(e) = self.label_error.as_ref().or(self.save_error.as_ref()) {
+            ("⚠ Save failed", Color32::from_rgb(235, 90, 80), format!("{e}\nRetried automatically at the next save."))
+        } else if self.label_dirty || self.labels_stale || !self.stale.is_empty() {
+            ("● Unsaved", Color32::from_rgb(230, 180, 60), "Changes are being written...".to_string())
+        } else {
+            (
+                "✔ Saved",
+                Color32::from_rgb(110, 200, 120),
+                format!(
+                    "YOLO label files are written after every edit.\nLabels: {}\nProject: {}",
+                    labels_dir_for(dir).display(),
+                    dir.join(PROJECT_FILE).display()
+                ),
+            )
+        };
+        ui.label(egui::RichText::new(text).color(color)).on_hover_text(tip);
+        ui.separator();
+    }
+
     fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
+                self.save_indicator(ui);
                 if let Some(l) = &self.loaded {
                     ui.label(format!(
                         "{}/{}  {}  {}×{}  zoom {:.0}%",
