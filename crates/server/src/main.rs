@@ -1,6 +1,8 @@
 //! YOLO Annotator lab server.
 //!
-//!   yolo-annotator-server.exe [DATASET_FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin] [--web DIR]
+//!   yolo-annotator-server.exe [DATASET_FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin] [--gpu N] [--web DIR]
+//!
+//! --gpu      GPU for the AI, numbered as in nvidia-smi (default 0)
 //!
 //! --listen   address to listen on (default all network interfaces; 127.0.0.1 = this PC only)
 //! --no-admin nobody can switch the dataset from a browser, not even on the server machine
@@ -79,6 +81,8 @@ struct Server {
     yolo_dir: PathBuf,
     /// nobody may switch the dataset from a browser
     no_admin: bool,
+    /// set by POST /api/shutdown (stop script on the server machine)
+    stop: tokio::sync::Notify,
 }
 
 type Shared = Arc<Server>;
@@ -664,6 +668,54 @@ async fn image(UrlPath(name): UrlPath<String>, AxState(srv): AxState<Shared>) ->
     }
 }
 
+/// Stop the server cleanly (everything saved). Only from the server machine itself.
+async fn shutdown(ConnectInfo(addr): ConnectInfo<SocketAddr>, AxState(srv): AxState<Shared>) -> Response {
+    if !addr.ip().is_loopback() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    log("stop requested on this machine");
+    {
+        let mut st = srv.inner.lock().unwrap();
+        st.flush();
+        st.broadcast(&ServerMsg::Status("The lab server is stopping; your labels are saved.".into()), None);
+    }
+    srv.stop.notify_one();
+    "stopping".into_response()
+}
+
+/// Load SAM on the chosen GPU and time a few image preparations (for choosing the GPU).
+fn ai_bench(image: &str) {
+    let img = match ai::decode_ai(Path::new(image)) {
+        Ok(i) => i,
+        Err(e) => return println!("cannot read {image}: {e}"),
+    };
+    let t0 = std::time::Instant::now();
+    let h = ai::start(AiSettings::default(), || {});
+    let wait = |what: &str| loop {
+        match h.rx.recv_timeout(std::time::Duration::from_secs(120)) {
+            Ok(AiResp::Encoded { ms, .. }) => return Some(ms),
+            Ok(AiResp::Ready(s)) => println!("ready after {:.1} s: {s} (GPU {})", t0.elapsed().as_secs_f32(), ai::gpu()),
+            Ok(AiResp::Error(e)) | Ok(AiResp::Unavailable(e)) | Ok(AiResp::EncodeFailed { err: e, .. }) => {
+                println!("{what}: {e}");
+                return None;
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    };
+    let mut times = vec![];
+    for k in 0..6 {
+        let _ = h.tx.send(ai::Req::Encode { key: format!("bench{k}"), img: img.clone() });
+        match wait("encode") {
+            Some(ms) => times.push(ms),
+            None => return,
+        }
+    }
+    println!("prepare image (SAM encoder): first {} ms, then {:?} ms", times[0], &times[1..]);
+    let rest = &times[1..];
+    println!("average {:.0} ms", rest.iter().sum::<u64>() as f32 / rest.len() as f32);
+}
+
 fn lan_ip() -> Option<std::net::IpAddr> {
     // no packet is sent: this only asks the OS which interface it would use
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -690,12 +742,23 @@ fn main() {
                 i += 1;
             }
             "--no-admin" => no_admin = true,
+            "--gpu" => {
+                if let Some(g) = args.get(i + 1).and_then(|g| g.parse().ok()) {
+                    ai::set_gpu(g);
+                }
+                i += 1;
+            }
+            "--ai-bench" => {
+                // yolo-annotator-server --gpu N --ai-bench IMAGE : time SAM on that GPU
+                ai_bench(args.get(i + 1).map(String::as_str).unwrap_or(""));
+                return;
+            }
             "--web" => {
                 web = args.get(i + 1).map(PathBuf::from);
                 i += 1;
             }
             "-h" | "--help" => {
-                println!("yolo-annotator-server [DATASET_FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin] [--web DIR]");
+                println!("yolo-annotator-server [DATASET_FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin] [--gpu N] [--web DIR]");
                 return;
             }
             a => dataset = Some(PathBuf::from(a)),
@@ -710,6 +773,7 @@ fn main() {
         exports_dir: exe_dir.join("exports"),
         yolo_dir: assets.join("models").join("yolo"),
         no_admin,
+        stop: tokio::sync::Notify::new(),
     });
     println!("YOLO Annotator lab server {VERSION}");
     // the dataset: argument, else the last one, else ask here on the server machine
@@ -745,6 +809,7 @@ fn main() {
         let app = Router::new()
             .route("/ws", get(ws_upgrade))
             .route("/api/image/*name", get(image))
+            .route("/api/shutdown", axum::routing::post(shutdown))
             .fallback_service(tower_http::services::ServeDir::new(&srv.web_dir))
             .with_state(srv.clone());
         let addr = SocketAddr::new(listen, port);
@@ -768,11 +833,15 @@ fn main() {
         );
         println!("Exports go to:     {}", srv.exports_dir.display());
         println!("YOLO models from:  {}", srv.yolo_dir.display());
+        println!("AI on GPU:         {} (numbered as in nvidia-smi; change with --gpu N)", ai::gpu());
         println!("Press Ctrl+C to stop (all labels are saved).");
         let shutdown = {
             let srv = srv.clone();
             async move {
-                let _ = tokio::signal::ctrl_c().await;
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = srv.stop.notified() => {}
+                }
                 srv.inner.lock().unwrap().flush();
                 println!("Saved. Bye.");
             }

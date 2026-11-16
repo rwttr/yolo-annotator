@@ -1,0 +1,2 @@
+# Extra options for the lab server, one per line. Example:
+# --gpu 0      (AI on this GPU, numbered as in nvidia-smi)

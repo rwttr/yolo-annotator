@@ -147,6 +147,23 @@ fn cuda_ready(cuda_rt: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// GPU used by CUDA / DirectML (0 = first). Set once at startup, before the AI starts.
+static GPU: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Choose the GPU, numbered like `nvidia-smi` (PCI bus order). Call before `start`.
+/// For CUDA this process then sees only that card (whatever CUDA_VISIBLE_DEVICES says for
+/// the user), so other CUDA work keeps its own setting.
+pub fn set_gpu(index: i32) {
+    let index = index.max(0);
+    std::env::set_var("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+    std::env::set_var("CUDA_VISIBLE_DEVICES", index.to_string());
+    GPU.store(index, Ordering::Relaxed);
+}
+
+pub fn gpu() -> i32 {
+    GPU.load(Ordering::Relaxed)
+}
+
 struct Runtime {
     engine: Engine, // the one actually used (never Auto)
     dll: PathBuf,
@@ -241,7 +258,7 @@ fn session(rt: &Runtime, model: &Path) -> Result<(Session, Engine, Option<String
                 .map_err(|e| e.to_string())?
                 .with_parallel_execution(false)
                 .map_err(|e| e.to_string())?
-                .with_execution_providers([ep::DirectML::default().build().error_on_failure()])
+                .with_execution_providers([ep::DirectML::default().with_device_id(gpu()).build().error_on_failure()])
                 .map_err(|e| e.to_string())?,
             _ => b,
         };

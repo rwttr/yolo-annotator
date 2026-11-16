@@ -130,14 +130,16 @@ desktop app, so you can train from that folder, or open it in the desktop app, a
 
 **Start it (on the server PC):**
 1. Unzip the program as usual. For the Magic tool on an NVIDIA GPU, also unzip the CUDA add-on.
-2. Double-click **`START LAB SERVER.bat`** and choose the dataset folder. Next time the same folder
-   opens automatically. To always use one folder, run
-   `yolo-annotator-server.exe "D:\datasets\alm_lane"`.
-3. When Windows asks, **allow network access for Private networks**. Without that, other PCs
+2. List your dataset folders in **`datasets.txt`**, one per line. Wildcards are allowed, e.g.
+   `D:\almondmatcha-lane\alm_lane_seg_dataset_2026*`.
+3. Double-click **`Start Lab Server.bat`** and pick the dataset by number. Enter picks the last
+   one. Without `datasets.txt` a folder dialog opens instead. **`Stop Lab Server.bat`** stops it
+   cleanly: all labels are saved first. To switch datasets, stop and start again.
+4. When Windows asks, **allow network access for Private networks**. Without that, other PCs
    cannot connect. Or add the rule once in an administrator PowerShell:
    `New-NetFirewallRule -DisplayName "YOLO Annotator lab" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private,Domain`
-4. The console shows the address, e.g. `http://172.30.243.125:8080`. Keep the window open.
-   Ctrl+C stops the server (everything is saved).
+5. The server window shows the address, e.g. `http://172.30.243.125:8080`, and who joins and
+   leaves. Keep it open; closing it or pressing Ctrl+C also stops the server.
 
 **Annotate (lab members):** open the address and type your name once. The browser remembers it,
 or bookmark `http://172.30.243.125:8080/?user=YourName`. Then work as in the desktop app.
@@ -156,7 +158,10 @@ outside the dataset's image list. To switch to another dataset, restart the serv
 folder, or use **Open** in a browser on the server PC itself (`http://localhost:8080`).
 `--no-admin` turns that off too.
 
-Options: `yolo-annotator-server.exe [FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin]`.
+Options: `yolo-annotator-server.exe [FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin] [--gpu N]`.
+Put options for **Start Lab Server** into `options.txt`, one per line. For example, `--gpu 0` puts the AI on
+that GPU, numbered as in `nvidia-smi`, regardless of `CUDA_VISIBLE_DEVICES`. To measure a card:
+`yolo-annotator-server.exe --gpu N --ai-bench some_image.jpg`.
 `--listen 127.0.0.1` keeps it to the server PC only, for a test.
 
 The lab server has no passwords. It is meant for a trusted lab network: do not expose its port to
@@ -340,7 +345,7 @@ cargo test --workspace # unit tests (YOLO import/export, mask -> polygon, ...)
 
 | File | Size | What it is |
 |---|---|---|
-| `YOLO-Annotator-<ver>-win64.zip` | ~700 MB | **Portable.** Unzip anywhere (even a USB stick) and run `yolo-annotator.exe`, or `START LAB SERVER.bat` for the lab server. Nothing is installed. |
+| `YOLO-Annotator-<ver>-win64.zip` | ~700 MB | **Portable.** Unzip anywhere (even a USB stick) and run `yolo-annotator.exe`, or `Start Lab Server.bat` for the lab server. Nothing is installed. |
 | `YOLO-Annotator-<ver>-cuda-addon.zip` | ~1.7 GB | **Optional, NVIDIA only.** Unzip where the program was unzipped, for the CUDA engine. |
 
 The program runs on any 64-bit Windows 10/11 PC with nothing else to install: the Visual C++

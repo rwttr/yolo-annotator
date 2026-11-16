@@ -2,7 +2,7 @@
 #   dist\yolo-annotator.exe            the desktop app (runs on its own; AI needs the folders below)
 #   dist\yolo-annotator-server.exe     the lab server (team annotation in the browser)
 #   dist\web\                          the web client the lab server serves
-#   dist\START LAB SERVER.bat          starts the lab server
+#   dist\Start / Stop Lab Server.bat   start (choose the dataset) / stop the lab server
 #   dist\models\sam2.1-*               SAM 2.1 models for the Magic tool
 #   dist\models\yolo\                  YOLO .onnx models offered by the lab server (empty)
 #   dist\runtime\directml              ONNX Runtime for any DirectX 12 GPU / CPU
@@ -17,7 +17,10 @@ cargo build --release -p yolo-annotator -p yolo-annotator-server
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force dist | Out-Null
 Copy-Item target\release\yolo-annotator.exe, target\release\yolo-annotator-server.exe dist\ -Force
-Copy-Item LICENSE, README.md, "assets\START LAB SERVER.bat" dist\ -Force
+Copy-Item LICENSE, README.md dist\ -Force
+# start / stop scripts; an existing datasets.txt (your dataset list) is kept
+Copy-Item server-scripts\*.bat, server-scripts\*.ps1 dist\ -Force
+foreach ($f in "datasets.txt", "options.txt") { if (-not (Test-Path "dist\$f")) { Copy-Item "server-scripts\$f" dist\ } }
 New-Item -ItemType Directory -Force dist\models\yolo | Out-Null
 & "$PSScriptRoot\build_web.ps1"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

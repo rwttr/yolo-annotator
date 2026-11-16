@@ -1,0 +1,3 @@
+# Dataset folders offered by "Start Lab Server" (one per line, wildcards allowed).
+# Example:
+# D:\datasets\my_dataset_*

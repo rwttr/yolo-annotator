@@ -47,7 +47,8 @@ New-Item -ItemType Directory -Force $app | Out-Null
 Copy-Item dist\yolo-annotator.exe, dist\LICENSE, dist\README.md $app
 # lab server: exe, its web client and start script
 if (Test-Path dist\yolo-annotator-server.exe) {
-    Copy-Item dist\yolo-annotator-server.exe, "dist\START LAB SERVER.bat" $app
+    Copy-Item dist\yolo-annotator-server.exe, dist\*.bat, dist\*.ps1 $app
+    Copy-Item server-scripts\datasets.txt, server-scripts\options.txt $app   # templates, not this PC's lists
     Copy-Item dist\web "$app\web" -Recurse
 }
 if (Test-Path dist\models) { Copy-Item dist\models $app -Recurse }
@@ -70,7 +71,8 @@ They work on any Windows 10/11 PC (GPU via DirectML, or CPU).
 NVIDIA PC? Unzip $cudaZip into this same folder for the faster CUDA engine.
 
 Team annotation in the browser (lab server):
-- On the server PC, double-click "START LAB SERVER.bat" and choose the dataset folder.
+- On the server PC, list your dataset folders in datasets.txt, double-click "Start Lab Server.bat"
+  and choose one. "Stop Lab Server.bat" stops it (everything saved).
   Allow network access when Windows asks (Private networks).
 - Lab members open the address it shows (e.g. http://172.30.243.125:8080) in Chrome / Edge / Firefox.
 - YOLO models for auto-labelling: put .onnx files into models\yolo.
