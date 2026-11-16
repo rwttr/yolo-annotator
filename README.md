@@ -9,6 +9,9 @@ A small, standalone Windows image annotator written in Rust (egui). It labels
 It includes AI assist: click an object to get its polygon (SAM 2.1), or pre-label images with
 your own YOLO model (see [AI assist](#ai-assist)).
 
+With the **lab server**, the whole lab annotates one dataset together in the browser, served
+from one PC on the local network (see [Lab server](#lab-server-annotate-together-in-the-browser)).
+
 ![Lane annotation in YOLO Annotator: two lane polygons and three lane-line polylines; the right lane is selected](assets/screenshot-select.jpg)
 *Lane segmentation: lane areas as polygons, lane markings as polylines. The selected lane is
 highlighted with its handles; the status bar shows the save state and the new-frame mode.*
@@ -109,6 +112,55 @@ The top bar, left to right: **Open · Save · Export** | the toolbox | **◀ ▶
 Mouse wheel zooms around the cursor. Middle-drag or Space+drag pans; in Select mode
 you can also drag an empty area to pan. Keys 1–9 pick the class (and recolor the
 selected shape). Ctrl+Z undoes, Ctrl+S saves, F fits the image to the window.
+
+## Lab server: annotate together in the browser
+
+One PC in the lab runs `yolo-annotator-server.exe` with the dataset. Everyone else annotates in a
+browser (Chrome, Edge or Firefox) with the same tools as the desktop app. Nothing is installed on
+their PCs. The server writes the same `labels\*.txt`, `annotations.json` and `classes.txt` as the
+desktop app, so you can train from that folder, or open it in the desktop app, at any time.
+
+```
+ Lab members' PCs (browser)                       server PC (e.g. 172.30.243.125)
+ ┌──────────────────────────┐  http + websocket   ┌──────────────────────────────────┐
+ │ http://172.30.243.125:8080│ ◄────────────────► │ yolo-annotator-server.exe         │
+ │ the annotator, in the page│  images, labels,    │  dataset folder · labels · AI    │
+ └──────────────────────────┘  live updates        └──────────────────────────────────┘
+```
+
+**Start it (on the server PC):**
+1. Unzip the program as usual. For the Magic tool on an NVIDIA GPU, also unzip the CUDA add-on.
+2. Double-click **`START LAB SERVER.bat`** and choose the dataset folder. Next time the same folder
+   opens automatically. To always use one folder, run
+   `yolo-annotator-server.exe "D:\datasets\alm_lane"`.
+3. When Windows asks, **allow network access for Private networks**. Without that, other PCs
+   cannot connect. Or add the rule once in an administrator PowerShell:
+   `New-NetFirewallRule -DisplayName "YOLO Annotator lab" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private,Domain`
+4. The console shows the address, e.g. `http://172.30.243.125:8080`. Keep the window open.
+   Ctrl+C stops the server (everything is saved).
+
+**Annotate (lab members):** open the address and type your name once. The browser remembers it,
+or bookmark `http://172.30.243.125:8080/?user=YourName`. Then work as in the desktop app.
+
+| What | How it works |
+|---|---|
+| Two people, one image | The first person to open an image edits it. Everyone else sees it **view only** with a banner, and a 🔒 *name* next to it in the image list. It becomes editable when that person moves on. |
+| Saving | Every finished edit is saved on the server right away. The others see the change live. The status bar shows ✔ Saved, plus your name and how many people are online. |
+| Classes | Adding, renaming or deleting a class, and changing the label format or polyline width, apply to everyone, in the same order. |
+| Magic tool / Auto-label | They run on the server's GPU. YOLO models are the `.onnx` files in the server's `models\yolo` folder. AI settings apply to everyone. |
+| Export | Written to the `exports` folder next to the server exe, under the name you type. |
+| Pre-fill new frames | Each person chooses their own (copy previous frame, or auto-label). |
+
+**Only the server PC chooses the dataset.** Lab members cannot open, browse or download anything
+outside the dataset's image list. To switch to another dataset, restart the server with another
+folder, or use **Open** in a browser on the server PC itself (`http://localhost:8080`).
+`--no-admin` turns that off too.
+
+Options: `yolo-annotator-server.exe [FOLDER] [--port 8080] [--listen 0.0.0.0] [--no-admin]`.
+`--listen 127.0.0.1` keeps it to the server PC only, for a test.
+
+The lab server has no passwords. It is meant for a trusted lab network: do not expose its port to
+the internet.
 
 ## AI assist
 
@@ -279,8 +331,8 @@ Requires Rust (MSVC toolchain) and the Visual Studio C++ Build Tools.
 
 ```powershell
 ./fetch_ai.ps1 -Cuda -CudaLibs   # once: SAM 2.1 models + ONNX Runtime DirectML + CUDA pack -> ai_assets\
-./build.ps1 -Cuda      # -> dist\ (exe + models + runtimes); without -Cuda: no CUDA pack
-cargo test             # unit tests (YOLO import/export, mask -> polygon)
+./build.ps1 -Cuda      # -> dist\ (desktop app, lab server + web client, models, runtimes)
+cargo test --workspace # unit tests (YOLO import/export, mask -> polygon, ...)
 ./package.ps1          # -> release\ : portable zip + CUDA add-on zip
 ```
 
@@ -288,14 +340,22 @@ cargo test             # unit tests (YOLO import/export, mask -> polygon)
 
 | File | Size | What it is |
 |---|---|---|
-| `YOLO-Annotator-<ver>-win64.zip` | ~690 MB | **Portable.** Unzip anywhere (even a USB stick) and run `yolo-annotator.exe`. Nothing is installed. |
+| `YOLO-Annotator-<ver>-win64.zip` | ~700 MB | **Portable.** Unzip anywhere (even a USB stick) and run `yolo-annotator.exe`, or `START LAB SERVER.bat` for the lab server. Nothing is installed. |
 | `YOLO-Annotator-<ver>-cuda-addon.zip` | ~1.7 GB | **Optional, NVIDIA only.** Unzip where the program was unzipped, for the CUDA engine. |
 
 The program runs on any 64-bit Windows 10/11 PC with nothing else to install: the Visual C++
 runtime needed by the AI engine ships in `runtime\vc`. Settings are stored per user in
 `%APPDATA%\YOLO Annotator`; annotations are always written next to your images.
 
-The program icon is drawn in code (`src/icon.rs`). After changing it, run
+The web client needs `rustup target add wasm32-unknown-unknown` and
+`cargo install --locked wasm-bindgen-cli --version <the wasm-bindgen version in Cargo.lock>`.
+`build.ps1` builds it with `build_web.ps1` into `dist\web`.
+
+Code layout: `crates/core` (annotation model, YOLO files, export, messages), `crates/ai` (SAM /
+YOLO via ONNX Runtime), `crates/ui` (the egui interface, shared by both apps), `src/` (desktop
+app), `crates/server` (lab server), `crates/web` (browser client).
+
+The program icon is drawn in code (`crates/ui/src/icon.rs`). After changing it, run
 `cargo run --example gen_icon` to regenerate `assets/icon.ico` (embedded in the .exe by
 `build.rs`) and `assets/icon.png`.
 

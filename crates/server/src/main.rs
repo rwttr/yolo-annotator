@@ -755,9 +755,17 @@ fn main() {
                 return;
             }
         };
-        let ip = lan_ip().map(|i| i.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
-        println!("Lab members open:  http://{ip}:{port}");
-        println!("On this machine:   http://localhost:{port}   (can switch the dataset)");
+        if listen.is_loopback() {
+            println!("Listening on this PC only (--listen {listen}): other PCs cannot connect.");
+        } else {
+            let ip = if listen.is_unspecified() { lan_ip() } else { Some(listen) };
+            let ip = ip.map(|i| i.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
+            println!("Lab members open:  http://{ip}:{port}");
+        }
+        println!(
+            "On this machine:   http://localhost:{port}{}",
+            if srv.no_admin { "" } else { "   (can switch the dataset)" }
+        );
         println!("Exports go to:     {}", srv.exports_dir.display());
         println!("YOLO models from:  {}", srv.yolo_dir.display());
         println!("Press Ctrl+C to stop (all labels are saved).");

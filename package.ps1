@@ -45,7 +45,14 @@ if ($hasCuda) {
 $app = Join-Path $stage "YOLO Annotator"
 New-Item -ItemType Directory -Force $app | Out-Null
 Copy-Item dist\yolo-annotator.exe, dist\LICENSE, dist\README.md $app
+# lab server: exe, its web client and start script
+if (Test-Path dist\yolo-annotator-server.exe) {
+    Copy-Item dist\yolo-annotator-server.exe, "dist\START LAB SERVER.bat" $app
+    Copy-Item dist\web "$app\web" -Recurse
+}
 if (Test-Path dist\models) { Copy-Item dist\models $app -Recurse }
+New-Item -ItemType Directory -Force "$app\models\yolo" | Out-Null
+Set-Content "$app\models\yolo\Put YOLO onnx models here.txt" "YOLO .onnx models in this folder are offered for auto-labelling by the lab server (yolo export model=best.pt format=onnx)."
 foreach ($r in "directml", "vc") {
     if (Test-Path "dist\runtime\$r") {
         New-Item -ItemType Directory -Force "$app\runtime" | Out-Null
@@ -61,6 +68,13 @@ YOLO Annotator $ver - portable
 AI tools (Magic tool, Auto-label) use the 'models' and 'runtime' folders next to the exe.
 They work on any Windows 10/11 PC (GPU via DirectML, or CPU).
 NVIDIA PC? Unzip $cudaZip into this same folder for the faster CUDA engine.
+
+Team annotation in the browser (lab server):
+- On the server PC, double-click "START LAB SERVER.bat" and choose the dataset folder.
+  Allow network access when Windows asks (Private networks).
+- Lab members open the address it shows (e.g. http://172.30.243.125:8080) in Chrome / Edge / Firefox.
+- YOLO models for auto-labelling: put .onnx files into models\yolo.
+- Exports are written to the 'exports' folder next to yolo-annotator-server.exe.
 
 See README.md for how to use it.  Copyright (c) 2026 DotoRobotics, MIT License (LICENSE).
 "@ | Set-Content "$app\READ ME FIRST.txt" -Encoding utf8

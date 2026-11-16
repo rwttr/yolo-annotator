@@ -1,18 +1,26 @@
 # Builds the release into dist\:
-#   dist\yolo-annotator.exe            the app (runs on its own; AI features need the folders below)
+#   dist\yolo-annotator.exe            the desktop app (runs on its own; AI needs the folders below)
+#   dist\yolo-annotator-server.exe     the lab server (team annotation in the browser)
+#   dist\web\                          the web client the lab server serves
+#   dist\START LAB SERVER.bat          starts the lab server
 #   dist\models\sam2.1-*               SAM 2.1 models for the Magic tool
+#   dist\models\yolo\                  YOLO .onnx models offered by the lab server (empty)
 #   dist\runtime\directml              ONNX Runtime for any DirectX 12 GPU / CPU
 #   dist\runtime\cuda                  optional CUDA pack (NVIDIA): only with -Cuda
-# Requires: Rust (MSVC toolchain) + Visual Studio C++ Build Tools.
+# Requires: Rust (MSVC toolchain) + Visual Studio C++ Build Tools, and for the web client the
+# wasm32-unknown-unknown target + wasm-bindgen-cli (see build_web.ps1).
 # Get the AI files first with .\fetch_ai.ps1 (add -Cuda for the CUDA pack).
 param([switch]$Cuda, [switch]$NoAI)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
-cargo build --release
+cargo build --release -p yolo-annotator -p yolo-annotator-server
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force dist | Out-Null
-Copy-Item target\release\yolo-annotator.exe dist\ -Force
-Copy-Item LICENSE, README.md dist\ -Force
+Copy-Item target\release\yolo-annotator.exe, target\release\yolo-annotator-server.exe dist\ -Force
+Copy-Item LICENSE, README.md, "assets\START LAB SERVER.bat" dist\ -Force
+New-Item -ItemType Directory -Force dist\models\yolo | Out-Null
+& "$PSScriptRoot\build_web.ps1"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $NoAI) {
     $a = Join-Path $PSScriptRoot "ai_assets"
@@ -44,4 +52,4 @@ if (-not $NoAI) {
         $global:LASTEXITCODE = 0
     }
 }
-Write-Host "Built: $PSScriptRoot\dist\yolo-annotator.exe"
+Write-Host "Built: $PSScriptRoot\dist (yolo-annotator.exe, yolo-annotator-server.exe, web\)"
