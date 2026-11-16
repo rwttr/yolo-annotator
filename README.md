@@ -82,7 +82,8 @@ dataset folder (`labels\`, `annotations.json`), never into the program folder.
    | **Box (B)** | drag a rectangle |
    | **Polygon (P)** | click points; click the first point, double-click, right-click or Enter to close |
    | **Polyline (L)** | click points; double-click, right-click or Enter to finish |
-   | **Select / Edit (V)** | click a shape; drag its points or the whole shape; double-click an edge to add a point; right-click a point to remove it; Del deletes the shape |
+   | **Select / Edit (V)** | click inside a shape to select it, or click one of its points to select just that point (amber dot); drag points or the whole shape; **Del deletes the selection**: the point if one is selected (press again to keep removing points), otherwise the whole shape; Esc goes from point back to shape |
+   | **Points (E)** | edit the points of the selected polygon / polyline (e.g. a Magic result): click or drag an edge to add a point (a **+** marks where), right-click a point (red ring) or hover + Backspace to remove it, drag a point to move it, drop a point onto its neighbour to merge the two; click another shape to edit that one |
    | **Magic (M)** | AI (SAM 2.1): click an object, or drag a box around it, to get its polygon; Enter or double-click accepts it |
 
    **Editing without switching tools:** a shape you just drew stays selected. Drag its

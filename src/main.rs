@@ -212,6 +212,8 @@ fn main() -> eframe::Result<()> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Select,
+    /// add / remove / move the points of the selected polygon or polyline
+    Points,
     BBox,
     Polygon,
     Polyline,
@@ -256,6 +258,16 @@ enum Drag {
     Vertex { shape: usize, idx: usize },
     Move { shape: usize, last: [f32; 2] },
     Pan,
+}
+
+/// Select tool: what a point edit (add / remove) under the mouse would act on.
+/// Only the selected polygon / polyline is considered.
+#[derive(Clone, Copy)]
+enum PointHover {
+    /// existing vertex: right-click / Backspace removes it
+    Vertex { shape: usize, idx: usize },
+    /// on an edge: right-click / double-click / I inserts a vertex at `at` after `edge`
+    Edge { shape: usize, edge: usize, at: [f32; 2] },
 }
 
 struct Loaded {
@@ -413,6 +425,11 @@ struct App {
     dirty: bool,
     labels_stale: bool,
     last_save: f64,
+    /// Select tool: vertex / edge of the selected shape under the mouse (updated every frame)
+    point_hover: Option<PointHover>,
+    /// (shape, point) clicked last: Del removes this point instead of the whole shape.
+    /// Only valid while that shape is the selected one (see `selected_point`).
+    sel_point: Option<(usize, usize)>,
     /// last failure of the periodic / forced save (None after a clean save)
     save_error: Option<String>,
     /// last failure writing the current image's label file
@@ -482,6 +499,8 @@ impl App {
             dirty: false,
             labels_stale: false,
             last_save: 0.0,
+            point_hover: None,
+            sel_point: None,
             save_error: None,
             label_error: None,
             status: "Open an image folder to start.".into(),
@@ -1085,7 +1104,7 @@ impl App {
     }
 
     fn set_tool(&mut self, t: Tool) {
-        if t != Tool::Select {
+        if !matches!(t, Tool::Select | Tool::Points) {
             self.last_draw_tool = t;
         }
         // keep a polygon / polyline that is still being drawn, and a Magic result
@@ -1393,7 +1412,40 @@ impl App {
     }
 
     /// Finish an edit drag: tidy the box corners; a box squashed to nothing is undone.
+    /// While a polygon / polyline point is dragged: the neighbouring point it would merge
+    /// into if released now (within HIT_TOL screen pixels). Returns (shape, neighbour index).
+    fn snap_target(&self) -> Option<(usize, usize)> {
+        let Drag::Vertex { shape, idx } = self.drag else { return None };
+        let s = self.shapes().get(shape).filter(|s| s.kind != Kind::BBox)?;
+        let n = s.pts.len();
+        let min = if s.kind == Kind::Polygon { 3 } else { 2 };
+        if idx >= n || n <= min {
+            return None;
+        }
+        let closed = s.kind == Kind::Polygon;
+        let prev = if idx > 0 { Some(idx - 1) } else { closed.then(|| n - 1) };
+        let next = if idx + 1 < n { Some(idx + 1) } else { closed.then_some(0) };
+        let tol = HIT_TOL / self.zoom;
+        [prev, next]
+            .into_iter()
+            .flatten()
+            .map(|j| (j, dist(s.pts[idx], s.pts[j])))
+            .filter(|(_, d)| *d <= tol)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(j, _)| (shape, j))
+    }
+
     fn end_drag(&mut self) {
+        // snap-merge: a point released onto its neighbour becomes one point
+        // (the drag already pushed an undo step, so Ctrl+Z restores both)
+        if let (Drag::Vertex { idx, .. }, Some((shape, j))) = (self.drag, self.snap_target()) {
+            if let Some(s) = self.shape_mut(shape) {
+                s.pts.remove(idx);
+            }
+            self.sel_point = Some((shape, if j > idx { j - 1 } else { j }));
+            self.touch();
+            self.status = "Points merged (Ctrl+Z to undo).".into();
+        }
         if let Drag::Vertex { shape, .. } | Drag::Move { shape, .. } = self.drag {
             let resizing = matches!(self.drag, Drag::Vertex { .. });
             let mut degenerate = false;
@@ -1416,7 +1468,19 @@ impl App {
     /// Select tool: any shape. Drawing tools: only the selected shape (so new shapes
     /// can still be drawn on top of / next to existing ones).
     fn try_start_edit(&mut self, p: [f32; 2], tol: f32) -> bool {
-        let hit = if self.tool == Tool::Select {
+        let hit = if self.tool == Tool::Points {
+            match self.find_point_hover(p, tol) {
+                Some(PointHover::Vertex { shape, idx }) => Some((shape, Drag::Vertex { shape, idx })),
+                Some(h @ PointHover::Edge { shape, edge, .. }) => {
+                    // drag on an edge: add a point there and move it right away
+                    // (apply_point_edit already pushed the undo step)
+                    self.apply_point_edit(h);
+                    self.drag = Drag::Vertex { shape, idx: edge + 1 };
+                    return true;
+                }
+                None => None,
+            }
+        } else if self.tool == Tool::Select {
             if let Some((si, vi)) = self.hit_vertex(p, tol) {
                 Some((si, Drag::Vertex { shape: si, idx: vi }))
             } else {
@@ -1441,6 +1505,10 @@ impl App {
             Some((si, d)) => {
                 self.push_undo();
                 self.selected = Some(si);
+                self.sel_point = match d {
+                    Drag::Vertex { idx, .. } if self.shapes()[si].kind != Kind::BBox => Some((si, idx)),
+                    _ => None,
+                };
                 self.drag = d;
                 true
             }
@@ -1451,6 +1519,13 @@ impl App {
     /// What a drag at `p` would do, as a cursor icon (None = nothing to edit there).
     fn edit_cursor(&self, p: [f32; 2], tol: f32) -> Option<CursorIcon> {
         let shapes = self.shapes();
+        if self.tool == Tool::Points {
+            return match self.find_point_hover(p, tol) {
+                Some(PointHover::Vertex { .. }) => Some(CursorIcon::PointingHand),
+                Some(PointHover::Edge { .. }) => Some(CursorIcon::Crosshair),
+                None => self.hit_shape(p, tol).map(|_| CursorIcon::PointingHand),
+            };
+        }
         let (si, vi) = if self.tool == Tool::Select {
             match self.hit_vertex(p, tol) {
                 Some((si, vi)) => (si, Some(vi)),
@@ -1527,6 +1602,82 @@ impl App {
         None
     }
 
+    /// Vertex or edge of the selected polygon / polyline at image point `p` (vertices win).
+    fn find_point_hover(&self, p: [f32; 2], tol: f32) -> Option<PointHover> {
+        let si = self.selected?;
+        let s = self.shapes().get(si).filter(|s| s.kind != Kind::BBox)?;
+        if let Some(idx) = nearest_handle(s, p, tol) {
+            return Some(PointHover::Vertex { shape: si, idx });
+        }
+        edges(s)
+            .into_iter()
+            .map(|(i, a, b)| (i, a, b, dist_to_segment(p, a, b)))
+            .filter(|e| e.3 <= tol)
+            .min_by(|x, y| x.3.total_cmp(&y.3))
+            .map(|(edge, a, b, _)| {
+                // the new point goes exactly onto the edge, not where the mouse is
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let l2 = (dx * dx + dy * dy).max(1e-9);
+                let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0);
+                PointHover::Edge { shape: si, edge, at: [a[0] + t * dx, a[1] + t * dy] }
+            })
+    }
+
+    /// The selected point of the selected polygon / polyline, if it is still valid.
+    fn selected_point(&self) -> Option<(usize, usize)> {
+        let (si, idx) = self.sel_point?;
+        let s = self.shapes().get(si)?;
+        (self.selected == Some(si) && s.kind != Kind::BBox && idx < s.pts.len()).then_some((si, idx))
+    }
+
+    /// Select what is under image point `p`: a point (→ shape + that point) or a shape's area
+    /// (→ the whole shape). Nothing there: deselect.
+    fn select_at(&mut self, p: Option<[f32; 2]>, tol: f32) {
+        let hv = p.and_then(|p| self.hit_vertex(p, tol));
+        self.selected = hv.map(|x| x.0).or_else(|| p.and_then(|p| self.hit_shape(p, tol)));
+        self.sel_point = hv.filter(|(si, _)| self.shapes()[*si].kind != Kind::BBox);
+    }
+
+    /// Add or remove a point of the selected shape as described by `h`.
+    fn apply_point_edit(&mut self, h: PointHover) {
+        match h {
+            PointHover::Vertex { shape, idx } => {
+                let Some(s) = self.shapes().get(shape) else { return };
+                let min = if s.kind == Kind::Polygon { 3 } else { 2 };
+                if idx >= s.pts.len() || s.kind == Kind::BBox {
+                    return;
+                }
+                if s.pts.len() <= min {
+                    self.status = format!("Cannot remove: a {} needs at least {min} points.", s.kind.name());
+                    return;
+                }
+                self.push_undo();
+                if let Some(s) = self.shape_mut(shape) {
+                    s.pts.remove(idx);
+                }
+            }
+            PointHover::Edge { shape, edge, at } => {
+                let Some(s) = self.shapes().get(shape) else { return };
+                if edge >= s.pts.len() || s.kind == Kind::BBox {
+                    return;
+                }
+                self.push_undo();
+                if let Some(s) = self.shape_mut(shape) {
+                    s.pts.insert(edge + 1, at);
+                }
+            }
+        }
+        self.selected = Some(match h {
+            PointHover::Vertex { shape, .. } | PointHover::Edge { shape, .. } => shape,
+        });
+        self.sel_point = match h {
+            PointHover::Vertex { .. } => None,
+            PointHover::Edge { shape, edge, .. } => Some((shape, edge + 1)),
+        };
+        self.point_hover = None; // indices changed: recomputed next frame
+        self.touch();
+    }
+
     /// Smallest shape under the point (so small objects inside big ones are reachable).
     fn hit_shape(&self, p: [f32; 2], tol: f32) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
@@ -1593,11 +1744,13 @@ impl App {
                     p(Key::F),
                     p(Key::Q),
                     p(Key::M),
+                    p(Key::I) || p(Key::Insert),
+                    p(Key::E),
                 ],
                 NUMS.iter().position(|k| p(*k)),
             )
         });
-        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg] = k;
+        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg, ins, ek] = k;
         if mg {
             self.set_tool(Tool::Magic);
         }
@@ -1628,6 +1781,9 @@ impl App {
         if v {
             self.set_tool(Tool::Select);
         }
+        if ek {
+            self.set_tool(Tool::Points);
+        }
         if b {
             self.set_tool(Tool::BBox);
         }
@@ -1654,10 +1810,29 @@ impl App {
         if enter && !self.drawing.is_empty() {
             self.finish_drawing();
         }
-        if back && !self.drawing.is_empty() {
+        // Edit-points tool: Backspace removes the point under the mouse, I adds one on the edge
+        let edit_key = match self.point_hover {
+            Some(h @ PointHover::Vertex { .. }) if back => Some(h),
+            Some(h @ PointHover::Edge { .. }) if ins => Some(h),
+            _ => None,
+        };
+        if self.tool == Tool::Points && self.drawing.is_empty() && edit_key.is_some() {
+            self.apply_point_edit(edit_key.unwrap());
+        } else if back && !self.drawing.is_empty() {
             self.drawing.pop();
         } else if del {
-            if let Some(s) = self.selected {
+            if let Some((si, idx)) = self.selected_point() {
+                // delete just that point; the previous one becomes selected, so pressing
+                // Del again keeps removing points (never the whole shape)
+                let n = self.shapes()[si].pts.len();
+                self.apply_point_edit(PointHover::Vertex { shape: si, idx });
+                if self.shapes()[si].pts.len() < n {
+                    let m = n - 1;
+                    self.sel_point = Some((si, if idx == 0 { m - 1 } else { idx - 1 }));
+                } else {
+                    self.sel_point = Some((si, idx)); // at the minimum: kept, message shown
+                }
+            } else if let Some(s) = self.selected {
                 self.delete_shape(s);
             }
         }
@@ -1666,6 +1841,8 @@ impl App {
                 self.drawing.clear();
             } else if matches!(self.drag, Drag::NewBox { .. }) {
                 self.drag = Drag::None;
+            } else if self.selected_point().is_some() {
+                self.sel_point = None; // back to the whole shape
             } else {
                 self.selected = None;
             }
@@ -1760,7 +1937,7 @@ impl App {
                             let s = clampi(p);
                             self.drag = Drag::NewBox { start: s, cur: s };
                         }
-                        Tool::Select => self.drag = Drag::Pan,
+                        Tool::Select | Tool::Points => self.drag = Drag::Pan,
                         _ => {}
                     }
                 }
@@ -1845,7 +2022,7 @@ impl App {
                 } else if rclick {
                     if self.magic.is_empty() {
                         // nothing prompted yet: right-click selects a shape (to edit it)
-                        self.selected = pos_img.and_then(|p| pick(self, p));
+                        self.select_at(pos_img, tol);
                     } else if let Some(p) = pos_img.filter(|p| inside(*p)) {
                         // right-click: "not this part"
                         self.magic.points.push((p, false));
@@ -1856,13 +2033,13 @@ impl App {
             Tool::BBox => {
                 // click (no drag) selects / deselects
                 if clicked {
-                    self.selected = pos_img.and_then(|p| pick(self, p));
+                    self.select_at(pos_img, tol);
                 }
             }
             Tool::Polygon | Tool::Polyline => {
                 // right-click while not drawing selects / deselects
                 if rclick && self.drawing.is_empty() {
-                    self.selected = pos_img.and_then(|p| pick(self, p));
+                    self.select_at(pos_img, tol);
                 }
                 if clicked {
                     if let Some(p) = pos_img {
@@ -1892,54 +2069,53 @@ impl App {
                 }
             }
             Tool::Select => {
-                if clicked {
-                    self.selected = pos_img.and_then(|p| pick(self, p));
+                // click a point: select that point; click inside / on a shape: the whole shape
+                if clicked || rclick {
+                    self.select_at(pos_img, tol);
                 }
-                // double-click on an edge of the selected polygon/polyline: insert a vertex
-                if dbl {
-                    if let (Some(si), Some(p)) = (self.selected, pos_img) {
-                        let hit = self.shapes().get(si).and_then(|s| {
-                            if s.kind == Kind::BBox {
-                                return None;
+            }
+            Tool::Points => {
+                // click an edge of the selected shape: add a point; right-click a point:
+                // remove it; click / right-click another shape: edit that one instead
+                let hover_edit = pos_img.and_then(|p| self.find_point_hover(p, tol));
+                let other = pos_img.and_then(|p| pick(self, p));
+                if clicked {
+                    match hover_edit {
+                        Some(h @ PointHover::Edge { .. }) => self.apply_point_edit(h),
+                        Some(PointHover::Vertex { shape, idx }) => self.sel_point = Some((shape, idx)),
+                        None => {
+                            // inside the shape (or another shape): select the whole shape
+                            if other.is_some() {
+                                self.selected = other;
+                                self.sel_point = None;
                             }
-                            edges(s)
-                                .into_iter()
-                                .map(|e| (e.0, dist_to_segment(p, e.1, e.2)))
-                                .filter(|e| e.1 <= tol)
-                                .min_by(|a, b| a.1.total_cmp(&b.1))
-                        });
-                        if let Some((ei, _)) = hit {
-                            self.push_undo();
-                            if let Some(s) = self.shape_mut(si) {
-                                s.pts.insert(ei + 1, clampi(p));
-                            }
-                            self.touch();
                         }
                     }
                 }
-                // right-click on a vertex: remove it
                 if rclick {
-                    if let Some(p) = pos_img {
-                        if let Some((si, vi)) = self.hit_vertex(p, tol) {
-                            let s = &self.shapes()[si];
-                            let min = match s.kind {
-                                Kind::Polygon => 3,
-                                Kind::Polyline => 2,
-                                Kind::BBox => usize::MAX,
-                            };
-                            if s.pts.len() > min {
-                                self.push_undo();
-                                if let Some(s) = self.shape_mut(si) {
-                                    s.pts.remove(vi);
-                                }
-                                self.selected = Some(si);
-                                self.touch();
+                    match hover_edit {
+                        Some(h @ PointHover::Vertex { .. }) => self.apply_point_edit(h),
+                        Some(PointHover::Edge { .. }) => {}
+                        None => {
+                            if other.is_some() {
+                                self.selected = other;
+                                self.sel_point = None;
                             }
                         }
                     }
                 }
             }
         }
+        // what a point edit would act on now (drawn below; used by Backspace / I)
+        self.point_hover = if self.tool == Tool::Points
+            && matches!(self.drag, Drag::None)
+            && !space
+            && !panning
+        {
+            hover.map(to_i).and_then(|p| self.find_point_hover(p, tol))
+        } else {
+            None
+        };
 
         // cursor
         if resp.hovered() {
@@ -1954,7 +2130,7 @@ impl App {
                     .cursor_img
                     .filter(|_| self.drawing.is_empty() && !matches!(self.drag, Drag::NewBox { .. }))
                     .and_then(|p| self.edit_cursor(p, tol));
-                edit.unwrap_or(if self.tool == Tool::Select {
+                edit.unwrap_or(if matches!(self.tool, Tool::Select | Tool::Points) {
                     CursorIcon::Default
                 } else {
                     CursorIcon::Crosshair
@@ -2005,6 +2181,39 @@ impl App {
         }
         drop(tri_cache);
 
+        // point-edit preview: red ring = right-click / Backspace removes this point,
+        // "+" marker = right-click / double-click / I adds a point here
+        match self.point_hover {
+            Some(PointHover::Vertex { shape, idx }) => {
+                if let Some(q) = self.shapes().get(shape).and_then(|s| s.pts.get(idx)) {
+                    let c = to_s(*q);
+                    let red = Color32::from_rgb(235, 70, 60);
+                    painter.circle_stroke(c, 8.0, Stroke::new(2.5_f32, red));
+                }
+            }
+            Some(PointHover::Edge { at, .. }) => {
+                let c = to_s(at);
+                painter.circle_filled(c, 6.0, Color32::from_black_alpha(160));
+                painter.circle_stroke(c, 6.0, Stroke::new(1.5_f32, Color32::WHITE));
+                let st = Stroke::new(1.5_f32, Color32::WHITE);
+                painter.line_segment([c - Vec2::X * 3.5, c + Vec2::X * 3.5], st);
+                painter.line_segment([c - Vec2::Y * 3.5, c + Vec2::Y * 3.5], st);
+            }
+            None => {}
+        }
+        // selected point (what Del removes): filled amber dot
+        if let Some((si, idx)) = self.selected_point() {
+            let q = to_s(self.shapes()[si].pts[idx]);
+            painter.circle_filled(q, 6.5, Color32::from_rgb(255, 196, 40));
+            painter.circle_stroke(q, 6.5, Stroke::new(1.5_f32, Color32::BLACK));
+        }
+        // snap-merge preview: releasing now merges the dragged point into this neighbour
+        if let Some((shape, j)) = self.snap_target() {
+            if let Some(q) = self.shapes().get(shape).and_then(|s| s.pts.get(j)) {
+                painter.circle_stroke(to_s(*q), 9.0, Stroke::new(2.5_f32, Color32::from_rgb(90, 220, 120)));
+            }
+        }
+
         let cc = class_color(self.class);
         if self.tool == Tool::Magic {
             self.draw_magic(&painter, &to_s, cc, rect);
@@ -2042,7 +2251,7 @@ impl App {
             );
         }
         // crosshair guide for drawing tools
-        if self.tool != Tool::Select && !space {
+        if !matches!(self.tool, Tool::Select | Tool::Points) && !space {
             if let Some(m) = hover {
                 let img_r = Rect::from_min_max(to_s([0.0, 0.0]), to_s([iw, ih]));
                 if img_r.contains(m) {
@@ -2174,6 +2383,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 3.0;
                         for (t, label, key, tip) in [
                             (Tool::Select, "Select", "V", "Selector: select, move, resize and delete shapes.\nQ toggles between Selector and the last annotation tool."),
+                            (Tool::Points, "Points", "E", "Edit the points of the selected polygon / polyline:\nclick or drag on an edge to add a point (+), right-click a point (red ring) or Backspace to remove it, drag a point to move it.\nDrop a point onto its neighbour to merge them. Click another shape to edit that one."),
                             (Tool::BBox, "Box", "B", "Annotate bounding boxes: drag a rectangle."),
                             (Tool::Polygon, "Polygon", "P", "Annotate instance-segmentation polygons: click points, click the first point (or right/double-click, Enter) to close."),
                             (Tool::Polyline, "Polyline", "L", "Annotate polylines: click points, right/double-click or Enter to finish."),
@@ -2344,8 +2554,12 @@ impl App {
                     }
                     ui.separator();
                 }
+                let point_sel = self.selected_point().is_some();
                 let hint = match self.tool {
-                    Tool::Select => "Click: select · drag point/shape: edit · dbl-click edge: add point · right-click point: remove · Del: delete · drag empty: pan",
+                    Tool::Select | Tool::Points if point_sel => "POINT selected (amber) · Del: delete this point · drag: move it · click inside the shape: select the whole shape · Esc: back to the whole shape",
+                    Tool::Select => "Click a point: select the point · click inside: select the shape · drag: move · Del: delete the selection · drag point/shape: edit ·  · E: edit points · drag empty: pan",
+                    Tool::Points if self.selected.is_none() => "EDIT POINTS · click a polygon or polyline to edit its points · V: back to Select",
+                    Tool::Points => "EDIT POINTS · click / drag edge (+): add point · right-click point (red) or Backspace: remove · drag point: move · drop on neighbour: merge · I: add at + · V: back to Select",
                     Tool::BBox => "Drag to draw a box · click a shape: select it · drag its handles / centre grip: resize / move · Del: delete · Esc: deselect",
                     Tool::Polygon => "Click to add points · click 1st point, double-click, Enter, or right-click (adds a last point): close · Backspace: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
                     Tool::Polyline => "Click to add points · double-click, Enter, or right-click (adds a last point): finish · Backspace: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
@@ -2636,7 +2850,8 @@ impl App {
                              • Box: drag a rectangle\n\
                              • Polygon: click points, click the first point (or double/right-click) to close\n\
                              • Polyline: click points, double/right-click to finish\n\
-                             • Select: drag points or whole shapes; double-click an edge to add a point; right-click a point to remove it\n\
+                             • Select: click inside a shape to select it, or click a point to select just that point (amber); Del deletes the point if one is selected, otherwise the whole shape\n\
+                             • Points (E): edit the points of the selected polygon / polyline: click or drag an edge to add a point, right-click a point (or hover + Backspace) to remove it, drop a point onto its neighbour to merge the two\n\
                              • In the drawing tools the shape you just drew stays selected: drag its handles (box corners or edge midpoints) or its centre grip to adjust. Box tool: click a shape to select it; Polygon / Polyline: right-click a shape. Del deletes the selection, Esc deselects\n\n\
                              Keys\n\
                              V/B/P/L tools · Q toggle Selector ↔ last annotation tool · A/D or ←/→ prev/next image · 1-9 class · Del delete · Ctrl+Z undo · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
@@ -2918,6 +3133,19 @@ fn draw_tool_icon(p: &egui::Painter, r: Rect, tool: Tool, c: Color32) {
     let pt = |x: f32, y: f32| r.min + Vec2::new(x * r.width(), y * r.height());
     let st = Stroke::new(1.8_f32, c);
     match tool {
+        Tool::Points => {
+            // polygon outline with square nodes and a "+"
+            let v = vec![pt(0.08, 0.55), pt(0.36, 0.14), pt(0.78, 0.3), pt(0.66, 0.9)];
+            p.add(egui::Shape::closed_line(v.clone(), st));
+            for q in v {
+                p.rect_filled(Rect::from_center_size(q, Vec2::splat(5.0)), 0.0, c);
+            }
+            let k = pt(0.86, 0.72);
+            let d = r.width() * 0.14;
+            let s2 = Stroke::new(2.0_f32, c);
+            p.line_segment([k - Vec2::X * d, k + Vec2::X * d], s2);
+            p.line_segment([k - Vec2::Y * d, k + Vec2::Y * d], s2);
+        }
         Tool::Select => {
             let arrow = [
                 pt(0.25, 0.06),
