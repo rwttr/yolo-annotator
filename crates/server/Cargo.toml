@@ -1,0 +1,16 @@
+[package]
+name = "yolo-annotator-server"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "YOLO Annotator lab server: serves the web annotator on the LAN, keeps the dataset, runs the AI"
+
+[dependencies]
+annot-core = { path = "../core" }
+annot-ai = { path = "../ai" }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde_json = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rfd = "0.15"

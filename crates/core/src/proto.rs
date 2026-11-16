@@ -112,6 +112,8 @@ pub enum AiResp {
     BatchDone { id: u64, labeled: usize, errors: Vec<String>, cancelled: bool },
     /// models available: SAM folders, YOLO .onnx files (lab server: names in its models folder)
     Models { sam: Vec<String>, yolo: Vec<String> },
+    /// lab: the AI settings everyone shares (sent on connect and when someone changes them)
+    Settings(AiSettings),
 }
 
 // ------------------------------------------------------------------ class / project operations

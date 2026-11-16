@@ -860,8 +860,13 @@ impl App {
     fn ensure_ai(&mut self) {
         if !self.ai_started {
             self.ai_started = true;
-            self.store.ai(AiReq::Settings(self.ai_settings.clone()));
-            self.ai_status = "starting...".into();
+            // (lab: the server keeps the shared settings; the AI starts with the first request)
+            if !self.lab() {
+                self.store.ai(AiReq::Settings(self.ai_settings.clone()));
+            }
+            if !self.ai_status.starts_with("ready") && !self.lab() {
+                self.ai_status = "starting...".into();
+            }
         }
     }
 
@@ -1106,6 +1111,7 @@ impl App {
                 self.ai_models = sam;
                 self.yolo_models = yolo;
             }
+            AiResp::Settings(s) => self.ai_settings = s,
         }
     }
 
@@ -1717,10 +1723,21 @@ impl App {
         let painter = painter.with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, Color32::from_gray(28));
         let Some(l) = &self.loaded else {
+            let msg = if !self.lab() {
+                "Open an image folder (Open button or Ctrl+O), or drag a folder onto this window"
+            } else if self.pending_load.is_some() {
+                "Loading image..."
+            } else if self.source.is_none() && self.connected {
+                "Waiting for the lab server's dataset..."
+            } else if self.source.is_none() {
+                "Connecting to the lab server..."
+            } else {
+                "Choose an image on the left"
+            };
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Open an image folder (Open button or Ctrl+O), or drag a folder onto this window",
+                msg,
                 FontId::proportional(18.0),
                 Color32::GRAY,
             );
@@ -2221,9 +2238,15 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let has = self.source.is_some();
-                if act_button(ui, Act::Open, "Open", true)
-                    .on_hover_text("Open a dataset folder (Ctrl+O)\nAll sub-folders are scanned. You can also drop a folder or image on the window.")
-                    .clicked()
+                // lab: only a browser on the server machine may switch the dataset
+                if (!self.lab() || self.admin)
+                    && act_button(ui, Act::Open, "Open", true)
+                        .on_hover_text(if self.lab() {
+                            "Switch the dataset folder for everyone (only on the server machine)"
+                        } else {
+                            "Open a dataset folder (Ctrl+O)\nAll sub-folders are scanned. You can also drop a folder or image on the window."
+                        })
+                        .clicked()
                 {
                     self.pick_dataset(ctx);
                 }
@@ -2880,7 +2903,7 @@ impl App {
                     .on_hover_text("Polygon simplification: smaller = more points, follows the edge closer");
                 ui.end_row();
             });
-            if self.ai_models.is_empty() && self.ai_started {
+            if self.ai_models.is_empty() && self.ai_started && (!lab || !self.user.is_empty() && self.connected) {
                 ui.colored_label(
                     Color32::from_rgb(230, 160, 60),
                     if lab { "No SAM models on the lab server." } else { "No SAM models found (models folder next to the exe)." },
@@ -3633,7 +3656,7 @@ impl App {
         }
         if let Some(u) = self.locked_by_other() {
             let msg = format!("View only: {u} is editing this image");
-            egui::Area::new(egui::Id::new("lock_banner"))
+            egui::Area::new(egui::Id::new("lock_banner")).fade_in(false).order(egui::Order::Foreground)
                 .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 56.0))
                 .interactable(false)
                 .show(ctx, |ui| {
