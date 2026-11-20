@@ -280,6 +280,10 @@ pub struct App {
     admin_dialog: bool,
     /// lab: the "who is online" window is open
     online_open: bool,
+    /// lab: text of the "your name" field in the online window
+    name_edit: String,
+    /// lab: a rename was sent and not answered yet
+    renaming: bool,
     /// the dataset pane (left) / tools pane (right) are shown; remembered by the app
     show_left: bool,
     show_right: bool,
@@ -369,6 +373,8 @@ impl App {
             rename_edit: None,
             admin_dialog: false,
             online_open: false,
+            name_edit: String::new(),
+            renaming: false,
             show_left: cc.storage.and_then(|s| eframe::get_value(s, "show_left")).unwrap_or(true),
             show_right: cc.storage.and_then(|s| eframe::get_value(s, "show_right")).unwrap_or(true),
             ctx: cc.egui_ctx.clone(),
@@ -395,6 +401,29 @@ impl App {
             polyline_width: width.unwrap_or(p.polyline_width),
             new_frames: frames.unwrap_or(p.new_frames),
         });
+    }
+
+    /// Lab: take on a new name locally. Our own locks and the online list follow at once,
+    /// so the image being edited does not turn view-only until the server's update arrives.
+    fn set_user_name(&mut self, new: &str) {
+        let old = std::mem::replace(&mut self.user, new.to_string());
+        for u in self.locks.values_mut().chain(self.users.iter_mut()) {
+            if *u == old {
+                *u = new.to_string();
+            }
+        }
+        self.user_edit = new.to_string();
+    }
+
+    /// Lab: ask the server for a new name (it answers with the name, made unique if taken).
+    fn rename_user(&mut self, wanted: &str) {
+        let wanted: String = wanted.trim().chars().take(40).collect();
+        if wanted.is_empty() || wanted == self.user {
+            return;
+        }
+        self.set_user_name(&wanted);
+        self.renaming = true;
+        self.store.rename(&wanted);
     }
 
     /// Lab: someone else is editing the current image, so it is shown read-only.
@@ -1268,9 +1297,11 @@ impl App {
                 self.admin = admin;
                 if user != self.user {
                     self.status = format!("The name '{}' is in use; you are '{user}'.", self.user);
-                    self.user = user.clone();
-                    self.user_edit = user;
+                    self.set_user_name(&user);
+                } else if self.renaming {
+                    self.status = format!("Your name is now '{user}'.");
                 }
+                self.renaming = false;
             }
             StoreEvent::Locks(l) => {
                 let was = self.locked_by_other().map(str::to_string);
@@ -3859,6 +3890,7 @@ impl App {
                     r.request_focus();
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     let name = self.user_edit.trim().to_string();
+                    ui.weak("You can change it later: click 'N online' at the bottom (or press U).");
                     if (ui.add_enabled(!name.is_empty(), egui::Button::new("Start")).clicked() || enter) && !name.is_empty() {
                         self.user = name.clone();
                         self.store.hello(&name);
@@ -3886,13 +3918,16 @@ impl App {
         }
         if self.online_open {
             let mut open = true;
+            let mut rename_to: Option<String> = None;
+            let users_owned = self.users.clone();
+            let mut users: Vec<&str> = users_owned.iter().map(String::as_str).collect();
+            users.dedup();
             // images each person has open (the locks they hold)
+            let locks_owned = self.locks.clone();
             let mut at: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-            for (img, u) in &self.locks {
+            for (img, u) in &locks_owned {
                 at.entry(u.as_str()).or_default().push(img.as_str());
             }
-            let mut users: Vec<&str> = self.users.iter().map(String::as_str).collect();
-            users.dedup();
             egui::Window::new(format!("Online ({})", users.len()))
                 .id(egui::Id::new("online_window"))
                 .open(&mut open)
@@ -3904,6 +3939,23 @@ impl App {
                     if !self.connected {
                         ui.colored_label(Color32::from_rgb(235, 90, 80), "Not connected to the lab server.");
                     }
+                    ui.horizontal(|ui| {
+                        ui.label("Your name:");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.name_edit)
+                                .desired_width(150.0)
+                                .char_limit(40)
+                                .hint_text(self.user.as_str()),
+                        );
+                        self.typing |= r.has_focus();
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        let wanted = self.name_edit.trim().to_string();
+                        let ok = self.connected && !wanted.is_empty() && wanted != self.user;
+                        if (ui.add_enabled(ok, egui::Button::new("Rename")).on_hover_text("Shown to the others from now on; your browser remembers it").clicked() || enter) && ok {
+                            rename_to = Some(wanted);
+                        }
+                    });
+                    ui.separator();
                     if users.is_empty() {
                         ui.weak("Nobody is connected.");
                     }
@@ -3931,6 +3983,10 @@ impl App {
                     });
                 });
             self.online_open &= open;
+            if let Some(n) = rename_to {
+                self.rename_user(&n);
+                self.name_edit.clear();
+            }
         }
         if let Some(u) = self.locked_by_other() {
             let msg = format!("View only: {u} is editing this image");

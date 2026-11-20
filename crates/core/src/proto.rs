@@ -306,6 +306,8 @@ pub enum ClientMsg {
     Op(ClassOp),
     Ai(AiReq),
     Export(ExportOpts),
+    /// change this client's name (answered with Welcome; made unique like at Hello)
+    Rename { user: String },
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

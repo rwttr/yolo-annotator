@@ -155,7 +155,7 @@ desktop app, so you can train from that folder, or open it in the desktop app, a
 5. The server window shows the address, e.g. `http://172.30.243.125:8080`, and who joins and
    leaves. Keep it open; closing it or pressing Ctrl+C also stops the server.
 
-**Annotate (lab members):** open the address and type your name once. The browser remembers it,
+**Annotate (lab members):** open the address and type your name once. To change it later, click *N online* at the bottom (or press **U**), type the new name next to *Your name* and press **Rename**; the others see the new name right away. The browser remembers it,
 or bookmark `http://172.30.243.125:8080/?user=YourName`. Then work as in the desktop app.
 
 | What | How it works |

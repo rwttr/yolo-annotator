@@ -61,4 +61,6 @@ pub trait Store {
     fn poll(&mut self) -> Vec<StoreEvent>;
     /// Lab: the user's name, sent to the server.
     fn hello(&mut self, _user: &str) {}
+    /// lab: change this user's name
+    fn rename(&mut self, _user: &str) {}
 }

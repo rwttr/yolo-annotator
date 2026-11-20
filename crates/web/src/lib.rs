@@ -164,6 +164,10 @@ impl Store for WebStore {
         self.send(&ClientMsg::Hello { user: user.to_string() });
     }
 
+    fn rename(&mut self, user: &str) {
+        self.send(&ClientMsg::Rename { user: user.to_string() });
+    }
+
     fn poll(&mut self) -> Vec<StoreEvent> {
         // WebSocket
         let mut incoming = vec![];
@@ -239,6 +243,10 @@ pub fn start() {
             if !u.trim().is_empty() {
                 // eframe keeps values as RON; a string is stored quoted
                 let _ = ls.set_item("user", &format!("{:?}", u.trim()));
+            }
+            // drop it from the address bar: a reload must not undo a later rename
+            if let (Ok(h), Ok(path)) = (w.history(), w.location().pathname()) {
+                let _ = h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
             }
         }
     }

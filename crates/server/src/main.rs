@@ -268,19 +268,25 @@ fn remembered_dataset() -> Option<PathBuf> {
 
 // ------------------------------------------------------------------ client messages
 
+/// `wanted`, trimmed (max 40 chars), made unique among the other clients: "Ann", "Ann (2)", ...
+fn unique_name(st: &Inner, id: u64, wanted: &str) -> String {
+    let base: String = wanted.trim().chars().take(40).collect();
+    let base = if base.is_empty() { "guest".to_string() } else { base };
+    let taken = |n: &str| st.clients.iter().any(|(k, c)| *k != id && c.user.as_deref() == Some(n));
+    let mut name = base.clone();
+    let mut k = 2;
+    while taken(&name) {
+        name = format!("{base} ({k})");
+        k += 1;
+    }
+    name
+}
+
 fn handle(srv: &Shared, id: u64, msg: ClientMsg) {
     let mut st = srv.inner.lock().unwrap();
     match msg {
         ClientMsg::Hello { user } => {
-            let base: String = user.trim().chars().take(40).collect();
-            let base = if base.is_empty() { "guest".to_string() } else { base };
-            let taken = |n: &str, st: &Inner| st.clients.iter().any(|(k, c)| *k != id && c.user.as_deref() == Some(n));
-            let mut name = base.clone();
-            let mut k = 2;
-            while taken(&name, &st) {
-                name = format!("{base} ({k})");
-                k += 1;
-            }
+            let name = unique_name(&st, id, &user);
             let admin = st.clients.get(&id).is_some_and(|c| c.admin);
             if let Some(c) = st.clients.get_mut(&id) {
                 c.user = Some(name.clone());
@@ -299,6 +305,22 @@ fn handle(srv: &Shared, id: u64, msg: ClientMsg) {
                 st.send(id, ServerMsg::Ai(AiResp::Ready(s)));
             }
             let u = st.users_msg();
+            st.broadcast(&u, None);
+        }
+        ClientMsg::Rename { user } => {
+            let Some(old) = st.clients.get(&id).and_then(|c| c.user.clone()) else { return };
+            let name = unique_name(&st, id, &user);
+            let admin = st.clients.get(&id).is_some_and(|c| c.admin);
+            if name != old {
+                if let Some(c) = st.clients.get_mut(&id) {
+                    c.user = Some(name.clone());
+                }
+                log(&format!("{old} is now {name}"));
+            }
+            st.send(id, ServerMsg::Welcome { version: VERSION.into(), admin, user: name });
+            // locks are kept per connection: they now show the new name
+            let (l, u) = (st.locks_msg(), st.users_msg());
+            st.broadcast(&l, None);
             st.broadcast(&u, None);
         }
         ClientMsg::AdminOpen { path } => {
