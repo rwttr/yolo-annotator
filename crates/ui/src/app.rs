@@ -71,6 +71,15 @@ enum PointHover {
     Edge { shape: usize, edge: usize, at: [f32; 2] },
 }
 
+/// One undo step: the current image's shapes before an edit.
+struct UndoStep {
+    /// None = the image had no annotation entry
+    shapes: Option<Vec<Annot>>,
+    /// the edit closed a polygon / polyline being drawn: undo reopens it with these points,
+    /// so further undos remove its points one by one
+    reopen: Option<(Tool, Vec<[f32; 2]>)>,
+}
+
 struct Loaded {
     name: String,
     tex: egui::TextureHandle,
@@ -197,8 +206,8 @@ pub struct App {
     zoom: f32,
     offset: Vec2,
     fit_pending: bool,
-    /// snapshots of the current image's shapes; None = the image had no annotation entry
-    undo: Vec<Option<Vec<Annot>>>,
+    /// snapshots of the current image's shapes
+    undo: Vec<UndoStep>,
     /// images whose label file must be rewritten at the next save (e.g. class deleted)
     stale: HashSet<String>,
     dirty: bool,
@@ -269,6 +278,11 @@ pub struct App {
     rename_edit: Option<String>,
     /// lab, on the server machine: the "switch dataset folder" window is open
     admin_dialog: bool,
+    /// lab: the "who is online" window is open
+    online_open: bool,
+    /// the dataset pane (left) / tools pane (right) are shown; remembered by the app
+    show_left: bool,
+    show_right: bool,
     ctx: egui::Context,
 }
 
@@ -354,6 +368,9 @@ impl App {
             unacked: HashSet::new(),
             rename_edit: None,
             admin_dialog: false,
+            online_open: false,
+            show_left: cc.storage.and_then(|s| eframe::get_value(s, "show_left")).unwrap_or(true),
+            show_right: cc.storage.and_then(|s| eframe::get_value(s, "show_right")).unwrap_or(true),
             ctx: cc.egui_ctx.clone(),
         };
         if lab && !app.user.is_empty() {
@@ -693,7 +710,7 @@ impl App {
         let shapes: Vec<Annot> = a
             .shapes
             .iter()
-            .map(|s| Annot { pts: s.pts.iter().map(|p| [p[0] * sx, p[1] * sy]).collect(), ..s.clone() })
+            .map(|s| Annot { pts: s.pts.iter().map(|p| [p[0] * sx, p[1] * sy]).collect(), hidden: false, ..s.clone() })
             .collect();
         let n = shapes.len();
         self.push_undo();
@@ -758,17 +775,56 @@ impl App {
             .as_ref()
             .and_then(|l| self.project.images.get(&l.name))
             .map(|a| a.shapes.clone());
-        self.undo.push(s);
+        self.undo.push(UndoStep { shapes: s, reopen: None });
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
     }
 
+    /// Ctrl+Z: step back one point of the polygon / polyline / Magic prompt being drawn,
+    /// else undo the last edit of the image. Undoing a just-closed polygon / polyline reopens
+    /// it, so its points can be taken back one by one too.
     fn undo(&mut self) {
+        if !self.drawing.is_empty() {
+            self.drawing.pop();
+            self.status = if self.drawing.is_empty() {
+                "Undone: last point removed; nothing left of the shape being drawn.".into()
+            } else {
+                format!("Undone: last point removed ({} left). Enter closes the shape, Esc drops it.", self.drawing.len())
+            };
+            return;
+        }
+        if self.tool == Tool::Magic && !self.magic.is_empty() {
+            if self.magic.points.pop().is_none() {
+                self.magic.bbox = None;
+            }
+            self.send_prompt();
+            return;
+        }
+        let reopen = self.undo.last().and_then(|u| u.reopen.clone());
+        self.undo_step();
+        if let Some((tool, pts)) = reopen {
+            // back to drawing that shape, with all its points; Ctrl+Z goes on point by point
+            if self.tool != tool {
+                self.accept_magic();
+                self.tool = tool;
+                self.last_draw_tool = tool;
+            }
+            self.status = format!(
+                "Undone: the {} is open again ({} points). Ctrl+Z removes its points one by one · Enter closes it · Esc drops it.",
+                if tool == Tool::Polygon { "polygon" } else { "polyline" },
+                pts.len()
+            );
+            self.drawing = pts;
+        }
+    }
+
+    /// Restore the shapes from before the last edit.
+    fn undo_step(&mut self) {
         // a drag in progress refers to shape indices that may not exist after the undo
         self.drag = Drag::None;
         if let Some(prev) = self.undo.pop() {
-            match prev {
+            match prev.shapes {
                 Some(shapes) => {
                     if let Some(s) = self.shapes_mut() {
                         *s = shapes;
@@ -820,6 +876,37 @@ impl App {
             self.drag = Drag::None;
             self.touch();
         }
+    }
+
+    /// Show / hide shape `i` of the current image (view only: no undo step, nothing saved).
+    fn set_hidden(&mut self, i: usize, hidden: bool) {
+        let Some(l) = &self.loaded else { return };
+        let Some(s) = self.project.images.get_mut(&l.name).and_then(|a| a.shapes.get_mut(i)) else { return };
+        s.hidden = hidden;
+        if hidden && self.selected == Some(i) {
+            self.selected = None;
+            self.sel_point = None;
+            if matches!(self.drag, Drag::Vertex { shape, .. } | Drag::Move { shape, .. } if shape == i) {
+                self.end_drag();
+            }
+        }
+    }
+
+    /// H: hide every shape of the current image, or show them all again if any is hidden.
+    fn toggle_all_hidden(&mut self) {
+        let n = self.shapes().len();
+        if n == 0 {
+            return;
+        }
+        let hide = !self.shapes().iter().any(|s| s.hidden);
+        for i in 0..n {
+            self.set_hidden(i, hide);
+        }
+        self.status = if hide {
+            format!("{n} shapes hidden on this image (H shows them again). Hidden shapes are still saved and exported.")
+        } else {
+            "All shapes shown.".into()
+        };
     }
 
     fn set_class(&mut self, c: usize) {
@@ -920,9 +1007,9 @@ impl App {
         self.magic.seq = m.seq + 1; // answers to older prompts must stay ignored
         let Some(pts) = m.shape else { return };
         let shape = if m.shape_is_box {
-            Annot { class: self.class, kind: Kind::BBox, pts }
+            Annot { hidden: false, class: self.class, kind: Kind::BBox, pts }
         } else {
-            Annot { class: self.class, kind: Kind::Polygon, pts }
+            Annot { hidden: false, class: self.class, kind: Kind::Polygon, pts }
         };
         self.add_shape(shape);
         self.status = "Magic: object added. Drag its points to adjust, or click the next object.".into();
@@ -1311,7 +1398,7 @@ impl App {
                     && (b[2] - b[0] < 1.0 || b[3] - b[1] < 1.0);
             }
             if degenerate {
-                self.undo();
+                self.undo_step();
                 self.status = "Box became too small, change undone.".into();
             }
         }
@@ -1341,7 +1428,7 @@ impl App {
                 self.hit_shape(p, tol)
                     .map(|si| (si, Drag::Move { shape: si, last: p }))
             }
-        } else if let Some(si) = self.selected.filter(|s| *s < self.shapes().len()) {
+        } else if let Some(si) = self.selected.filter(|s| *s < self.shapes().len() && !self.shapes()[*s].hidden) {
             let s = &self.shapes()[si];
             if let Some(vi) = nearest_handle(s, p, tol) {
                 Some((si, Drag::Vertex { shape: si, idx: vi }))
@@ -1386,7 +1473,7 @@ impl App {
                 None => return self.hit_shape(p, tol).map(|_| CursorIcon::Move),
             }
         } else {
-            let si = self.selected.filter(|s| *s < shapes.len())?;
+            let si = self.selected.filter(|s| *s < shapes.len() && !shapes[*s].hidden)?;
             let s = &shapes[si];
             match nearest_handle(s, p, tol) {
                 Some(vi) => (si, Some(vi)),
@@ -1433,11 +1520,16 @@ impl App {
             return;
         }
         self.drawing.clear();
+        let tool = if kind == Kind::Polygon { Tool::Polygon } else { Tool::Polyline };
         self.add_shape(Annot {
+            hidden: false,
             class: self.class,
             kind,
-            pts,
+            pts: pts.clone(),
         });
+        if let Some(u) = self.undo.last_mut() {
+            u.reopen = Some((tool, pts));
+        }
     }
 
     /// (shape index, handle index). The selected shape gets priority.
@@ -1449,6 +1541,9 @@ impl App {
             order.insert(0, s);
         }
         for si in order {
+            if shapes[si].hidden {
+                continue;
+            }
             if let Some(vi) = nearest_handle(&shapes[si], p, tol) {
                 return Some((si, vi));
             }
@@ -1459,7 +1554,7 @@ impl App {
     /// Vertex or edge of the selected polygon / polyline at image point `p` (vertices win).
     fn find_point_hover(&self, p: [f32; 2], tol: f32) -> Option<PointHover> {
         let si = self.selected?;
-        let s = self.shapes().get(si).filter(|s| s.kind != Kind::BBox)?;
+        let s = self.shapes().get(si).filter(|s| s.kind != Kind::BBox && !s.hidden)?;
         if let Some(idx) = nearest_handle(s, p, tol) {
             return Some(PointHover::Vertex { shape: si, idx });
         }
@@ -1536,7 +1631,7 @@ impl App {
     fn hit_shape(&self, p: [f32; 2], tol: f32) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (i, s) in self.shapes().iter().enumerate() {
-            if shape_contains(s, p, tol) {
+            if !s.hidden && shape_contains(s, p, tol) {
                 let b = s.bounds();
                 let area = (b[2] - b[0]) * (b[3] - b[1]);
                 if best.map_or(true, |x| area < x.1) {
@@ -1601,11 +1696,27 @@ impl App {
                     p(Key::I) || p(Key::Insert),
                     p(Key::E),
                     p(Key::C),
+                    p(Key::H),
+                    p(Key::OpenBracket),
+                    p(Key::CloseBracket),
+                    p(Key::U),
                 ],
                 NUMS.iter().position(|k| p(*k)),
             )
         });
-        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg, ins, ek, cp] = k;
+        let [v, b, pk, l, prev, next, del, back, esc, enter, f, q, mg, ins, ek, cp, hk, lp, rp, uk] = k;
+        if uk && self.lab() {
+            self.online_open = !self.online_open;
+        }
+        if hk {
+            self.toggle_all_hidden();
+        }
+        if lp {
+            self.show_left = !self.show_left;
+        }
+        if rp {
+            self.show_right = !self.show_right;
+        }
         if mg {
             self.set_tool(Tool::Magic);
         }
@@ -1678,7 +1789,8 @@ impl App {
             self.apply_point_edit(edit_key.unwrap());
         } else if back && !self.drawing.is_empty() {
             self.drawing.pop();
-        } else if del {
+        } else if del || back {
+            // Backspace works like Del (Mac keyboards have no Del key)
             if let Some((si, idx)) = self.selected_point() {
                 // delete just that point; the previous one becomes selected, so pressing
                 // Del again keeps removing points (never the whole shape)
@@ -1750,6 +1862,8 @@ impl App {
             self.fit_pending = false;
         }
 
+        // Tab held (not while typing): show only the selected shape, the rest come back on release
+        let peek = !self.typing && ui.input(|i| i.focused && !i.modifiers.alt && i.key_down(Key::Tab));
         let (scroll, zoom_delta, latest, space, press_origin) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
@@ -1857,6 +1971,7 @@ impl App {
                 Drag::NewBox { start, cur } => {
                     if (start[0] - cur[0]).abs() >= 2.0 && (start[1] - cur[1]).abs() >= 2.0 {
                         self.add_shape(Annot {
+                            hidden: false,
                             class: self.class,
                             kind: Kind::BBox,
                             pts: vec![
@@ -2022,6 +2137,9 @@ impl App {
             tri_cache.clear();
         }
         for (i, s) in self.shapes().iter().enumerate() {
+            if s.hidden || (peek && self.selected != Some(i)) {
+                continue;
+            }
             // triangulation is independent of zoom / pan, so it is computed once per shape
             let tri: &[u32] = if s.kind == Kind::Polygon {
                 tri_cache.entry(pts_key(&s.pts)).or_insert_with(|| {
@@ -2188,7 +2306,7 @@ impl App {
         } else if self.magic.is_empty() {
             "Magic: click an object (or drag a box around it)".to_string()
         } else if self.magic.shape.is_some() {
-            "Enter / double-click: accept · click: add area · right-click: remove area · Backspace: undo point · Esc: cancel".to_string()
+            "Enter / double-click: accept · click: add area · right-click: remove area · Backspace or Ctrl+Z: undo point · Esc: cancel".to_string()
         } else {
             "Magic: segmenting...".to_string()
         };
@@ -2237,6 +2355,12 @@ impl App {
             ui.add_space(3.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
+                if panel_button(ui, Act::LeftPanel, self.show_left)
+                    .on_hover_text(if self.show_left { "Hide the dataset pane ( [ )" } else { "Show the dataset pane ( [ )" })
+                    .clicked()
+                {
+                    self.show_left = !self.show_left;
+                }
                 let has = self.source.is_some();
                 // lab: only a browser on the server machine may switch the dataset
                 if (!self.lab() || self.admin)
@@ -2361,6 +2485,13 @@ impl App {
                     }
                     self.touch();
                 }
+                ui.separator();
+                if panel_button(ui, Act::RightPanel, self.show_right)
+                    .on_hover_text(if self.show_right { "Hide the tools pane: classes, objects, AI ( ] )" } else { "Show the tools pane: classes, objects, AI ( ] )" })
+                    .clicked()
+                {
+                    self.show_right = !self.show_right;
+                }
             });
             ui.add_space(3.0);
         });
@@ -2409,7 +2540,7 @@ impl App {
     }
 
     /// Saved / unsaved / failed badge at the start of the status bar.
-    fn save_indicator(&self, ui: &mut egui::Ui) {
+    fn save_indicator(&self, ui: &mut egui::Ui, online_toggle: &mut bool) {
         let Some(src) = &self.source else { return };
         let pending = if self.lab() { !self.unacked.is_empty() } else { self.labels_stale || !self.stale.is_empty() };
         let (text, color, tip) = if let Some(e) = self.label_error.as_ref().or(self.save_error.as_ref()) {
@@ -2438,11 +2569,17 @@ impl App {
             } else {
                 ("🖧 offline".to_string(), Color32::from_rgb(235, 90, 80))
             };
-            ui.label(egui::RichText::new(t).color(c)).on_hover_text(if self.users.is_empty() {
-                "Lab server".to_string()
-            } else {
-                format!("Working on this dataset:\n{}", self.users.join("\n"))
-            });
+            let r = ui
+                .add(egui::Label::new(egui::RichText::new(t).color(c)).sense(Sense::click()))
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text(if self.online_open {
+                    "Hide the list of who is online (U)"
+                } else {
+                    "Show who is online and which image each person is on (U)"
+                });
+            if r.clicked() {
+                *online_toggle = true;
+            }
             ui.separator();
         }
     }
@@ -2450,7 +2587,11 @@ impl App {
     fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                self.save_indicator(ui);
+                let mut online_toggle = false;
+                self.save_indicator(ui, &mut online_toggle);
+                if online_toggle {
+                    self.online_open = !self.online_open;
+                }
                 if self.source.is_some() && self.project.new_frames != NewFrames::Empty {
                     let t = match self.project.new_frames {
                         NewFrames::CopyPrevious => "⏩ New frames: copy previous",
@@ -2477,14 +2618,14 @@ impl App {
                 }
                 let point_sel = self.selected_point().is_some();
                 let hint = match self.tool {
-                    Tool::Select | Tool::Points if point_sel => "POINT selected (amber) · Del: delete this point · drag: move it · click inside the shape: select the whole shape · Esc: back to the whole shape",
-                    Tool::Select => "Click a point: select the point · click inside: select the shape · drag: move · Del: delete the selection · drag point/shape: edit ·  · E: edit points · drag empty: pan",
+                    Tool::Select | Tool::Points if point_sel => "POINT selected (amber) · Del or Backspace: delete this point · drag: move it · click inside the shape: select the whole shape · Esc: back to the whole shape",
+                    Tool::Select => "Click a point: select the point · click inside: select the shape · drag: move · Del or Backspace: delete the selection · drag point/shape: edit ·  · E: edit points · drag empty: pan",
                     Tool::Points if self.selected.is_none() => "EDIT POINTS · click a polygon or polyline to edit its points · V: back to Select",
                     Tool::Points => "EDIT POINTS · click / drag edge (+): add point · right-click point (red) or Backspace: remove · drag point: move · drop on neighbour: merge · I: add at + · V: back to Select",
-                    Tool::BBox => "Drag to draw a box · click a shape: select it · drag its handles / centre grip: resize / move · Del: delete · Esc: deselect",
-                    Tool::Polygon => "Click to add points · click 1st point, double-click, Enter, or right-click (adds a last point): close · Backspace: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
-                    Tool::Polyline => "Click to add points · double-click, Enter, or right-click (adds a last point): finish · Backspace: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
-                    Tool::Magic => "Click an object or drag a box · click: add area · right-click: remove area · Enter / double-click: accept · Backspace: undo point · Esc: cancel",
+                    Tool::BBox => "Drag to draw a box · click a shape: select it · drag its handles / centre grip: resize / move · Del or Backspace: delete · Esc: deselect",
+                    Tool::Polygon => "Click to add points · click 1st point, double-click, Enter, or right-click (adds a last point): close · Backspace or Ctrl+Z: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
+                    Tool::Polyline => "Click to add points · double-click, Enter, or right-click (adds a last point): finish · Backspace or Ctrl+Z: undo point · Esc: cancel · right-click a shape: select it, then drag handles / centre to edit",
+                    Tool::Magic => "Click an object or drag a box · click: add area · right-click: remove area · Enter / double-click: accept · Backspace or Ctrl+Z: undo point · Esc: cancel",
                 };
                 ui.weak(hint);
                 ui.separator();
@@ -2732,11 +2873,34 @@ impl App {
                     }
 
                     ui.separator();
-                    ui.heading("Objects in this image");
+                    let mut all_toggle = false;
+                    ui.horizontal(|ui| {
+                        ui.heading("Objects in this image");
+                        if !self.shapes().is_empty() {
+                            let any_hidden = self.shapes().iter().any(|s| s.hidden);
+                            all_toggle = eye_button(ui, !any_hidden)
+                                .on_hover_text(if any_hidden { "Show all shapes (H)" } else { "Hide all shapes of this image (H)" })
+                                .clicked();
+                        }
+                    });
+                    if all_toggle {
+                        self.toggle_all_hidden();
+                    }
                     let mut del = None;
                     let mut sel = None;
+                    let mut vis_toggle = None;
                     for (i, s) in self.shapes().iter().enumerate() {
                         ui.horizontal(|ui| {
+                            if eye_button(ui, !s.hidden)
+                                .on_hover_text(if s.hidden {
+                                    "Hidden on the image (still saved and exported). Click to show."
+                                } else {
+                                    "Hide this shape on the image (it stays saved and exported)"
+                                })
+                                .clicked()
+                            {
+                                vis_toggle = Some((i, !s.hidden));
+                            }
                             let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             ui.painter().rect_filled(r, 2.0, class_color(s.class));
                             let cname = self
@@ -2745,12 +2909,9 @@ impl App {
                                 .get(s.class)
                                 .map(|s| s.as_str())
                                 .unwrap_or("?");
-                            if ui
-                                .selectable_label(
-                                    self.selected == Some(i),
-                                    format!("#{i} {} – {cname}", s.kind.name()),
-                                )
-                                .clicked()
+                            let text = egui::RichText::new(format!("#{i} {} – {cname}", s.kind.name()));
+                            let text = if s.hidden { text.weak().italics() } else { text };
+                            if ui.selectable_label(self.selected == Some(i), text).clicked()
                             {
                                 sel = Some(i);
                             }
@@ -2759,8 +2920,14 @@ impl App {
                             }
                         });
                     }
+                    if let Some((i, hide)) = vis_toggle {
+                        self.set_hidden(i, hide);
+                    }
                     if let Some(i) = sel {
+                        // selecting a hidden shape shows it again (so it can be edited)
+                        self.set_hidden(i, false);
                         self.selected = Some(i);
+                        self.sel_point = None;
                     }
                     if let Some(i) = del {
                         self.delete_shape(i);
@@ -2804,12 +2971,12 @@ impl App {
                              • Box: drag a rectangle\n\
                              • Polygon: click points, click the first point (or double/right-click) to close\n\
                              • Polyline: click points, double/right-click to finish\n\
-                             • Select: click inside a shape to select it, or click a point to select just that point (amber); Del deletes the point if one is selected, otherwise the whole shape\n\
+                             • Select: click inside a shape to select it, or click a point to select just that point (amber); Del or Backspace deletes the point if one is selected, otherwise the whole shape\n\
                              • Points (E): edit the points of the selected polygon / polyline: click or drag an edge to add a point, right-click a point (or hover + Backspace) to remove it, drop a point onto its neighbour to merge the two\n\
                              • Video frames: under 'Video / frame sequence' (right panel), new frames can be pre-filled with the previous frame's labels or by your YOLO model; C copies the previous frame's labels. Export: 'Split by folder' keeps each video in train or in val\n\
-                             • In the drawing tools the shape you just drew stays selected: drag its handles (box corners or edge midpoints) or its centre grip to adjust. Box tool: click a shape to select it; Polygon / Polyline: right-click a shape. Del deletes the selection, Esc deselects\n\n\
+                             • In the drawing tools the shape you just drew stays selected: drag its handles (box corners or edge midpoints) or its centre grip to adjust. Box tool: click a shape to select it; Polygon / Polyline: right-click a shape. Del or Backspace deletes the selection, Esc deselects\n\n\
                              Keys\n\
-                             V/B/P/L tools · Q toggle Selector <-> last annotation tool · A/D or Left/Right arrows prev/next image · 1-9 class · Del delete · Ctrl+Z undo · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
+                             V/B/P/L tools · Q toggle Selector <-> last annotation tool · A/D or Left/Right arrows prev/next image · 1-9 class · Del or Backspace delete (Mac: Backspace) · Ctrl+Z undo (while drawing: one point at a time; right after closing a polygon: reopens it) · H hide / show the shapes of this image · hold Tab: show only the selected shape · U who is online (lab) · [ and ] hide / show the side panes · Ctrl+O open · Ctrl+S save · Ctrl+E export · F fit · Esc cancel\n\n\
                              Saving\n\
                              Everything autosaves to annotations.json in the image folder, and YOLO .txt files are written to the 'labels' folder next to it (images -> labels). Use 'Export...' to build a train/val split with data.yaml.",
                         );
@@ -3189,6 +3356,63 @@ enum Act {
     Fit,
     Undo,
     Auto,
+    LeftPanel,
+    RightPanel,
+}
+
+/// Top-bar toggle for a side pane: the pane's side of the icon is filled while it is shown.
+fn panel_button(ui: &mut egui::Ui, act: Act, shown: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 30.0), Sense::click());
+    let vis = ui.visuals().clone();
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 5.0, vis.widgets.hovered.weak_bg_fill);
+    }
+    let fg = if shown { vis.text_color() } else { vis.weak_text_color() };
+    let r = Rect::from_center_size(rect.center(), Vec2::splat(22.0));
+    draw_act_icon(p, r, act, fg);
+    if shown {
+        let pt = |x: f32, y: f32| r.min + Vec2::new(x * r.width(), y * r.height());
+        let side = if matches!(act, Act::LeftPanel) {
+            Rect::from_min_max(pt(0.08, 0.16), pt(0.36, 0.84))
+        } else {
+            Rect::from_min_max(pt(0.64, 0.16), pt(0.92, 0.84))
+        };
+        p.rect_filled(side, 1.0, fg.gamma_multiply(0.6));
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Eye icon button: shape shown (open eye) / hidden (struck through).
+fn eye_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(20.0, 16.0), Sense::click());
+    let vis = ui.visuals().clone();
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 3.0, vis.widgets.hovered.weak_bg_fill);
+    }
+    let c = if visible { vis.text_color() } else { vis.weak_text_color().gamma_multiply(0.7) };
+    let st = Stroke::new(1.3_f32, c);
+    let ctr = rect.center();
+    let (hw, hh) = (7.0_f32, 4.2_f32);
+    // almond outline: two arcs through the corners
+    let arc = |sign: f32| -> Vec<Pos2> {
+        (0..=12)
+            .map(|i| {
+                let x = -hw + 2.0 * hw * i as f32 / 12.0;
+                ctr + Vec2::new(x, sign * hh * (1.0 - (x / hw).powi(2)))
+            })
+            .collect()
+    };
+    p.add(egui::Shape::line(arc(1.0), st));
+    p.add(egui::Shape::line(arc(-1.0), st));
+    if visible {
+        p.circle_filled(ctr, 2.3, c);
+    } else {
+        p.circle_stroke(ctr, 2.0, st);
+        p.line_segment([ctr + Vec2::new(-6.5, 5.5), ctr + Vec2::new(6.5, -5.5)], Stroke::new(1.6_f32, c));
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Top-bar action button: drawn icon (+ optional label). Shortcuts are in the tooltip.
@@ -3301,6 +3525,12 @@ fn draw_act_icon(p: &egui::Painter, r: Rect, act: Act, c: Color32) {
                 2.5,
             ));
             sparkle(p, pt(0.74, 0.26), r.width() * 0.22, c);
+        }
+        Act::LeftPanel | Act::RightPanel => {
+            // window with a side pane
+            p.rect_stroke(Rect::from_min_max(pt(0.08, 0.16), pt(0.92, 0.84)), 2.0, st);
+            let x = if matches!(act, Act::LeftPanel) { 0.36 } else { 0.64 };
+            line(vec![pt(x, 0.16), pt(x, 0.84)]);
         }
     }
 }
@@ -3654,6 +3884,54 @@ impl App {
                 });
             self.admin_dialog &= open;
         }
+        if self.online_open {
+            let mut open = true;
+            // images each person has open (the locks they hold)
+            let mut at: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (img, u) in &self.locks {
+                at.entry(u.as_str()).or_default().push(img.as_str());
+            }
+            let mut users: Vec<&str> = self.users.iter().map(String::as_str).collect();
+            users.dedup();
+            egui::Window::new(format!("Online ({})", users.len()))
+                .id(egui::Id::new("online_window"))
+                .open(&mut open)
+                .collapsible(true)
+                .resizable(true)
+                .default_width(300.0)
+                .default_pos(ctx.screen_rect().left_bottom() + Vec2::new(12.0, -360.0))
+                .show(ctx, |ui| {
+                    if !self.connected {
+                        ui.colored_label(Color32::from_rgb(235, 90, 80), "Not connected to the lab server.");
+                    }
+                    if users.is_empty() {
+                        ui.weak("Nobody is connected.");
+                    }
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        egui::Grid::new("online_grid").num_columns(2).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                            for u in &users {
+                                let me = *u == self.user;
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("●").color(Color32::from_rgb(110, 200, 120)));
+                                    let name = egui::RichText::new(if me { format!("{u} (you)") } else { u.to_string() });
+                                    ui.label(if me { name.strong() } else { name });
+                                });
+                                match at.get(u) {
+                                    Some(imgs) => {
+                                        let shown = imgs.join(", ");
+                                        ui.weak(&shown).on_hover_text(format!("Editing: {shown}"));
+                                    }
+                                    None => {
+                                        ui.weak("-");
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
+            self.online_open &= open;
+        }
         if let Some(u) = self.locked_by_other() {
             let msg = format!("View only: {u} is editing this image");
             egui::Area::new(egui::Id::new("lock_banner")).fade_in(false).order(egui::Order::Foreground)
@@ -3698,8 +3976,12 @@ impl eframe::App for App {
         self.handle_keys(ctx);
         self.top_bar(ctx);
         self.status_bar(ctx);
-        self.file_list(ctx);
-        self.right_panel(ctx);
+        if self.show_left {
+            self.file_list(ctx);
+        }
+        if self.show_right {
+            self.right_panel(ctx);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| self.canvas(ui));
@@ -3755,6 +4037,8 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "user", &self.user);
+        eframe::set_value(storage, "show_left", &self.show_left);
+        eframe::set_value(storage, "show_right", &self.show_right);
     }
 }
 
@@ -3781,10 +4065,11 @@ mod label_tests {
 
     #[test]
     fn tags_sit_on_the_shape() {
-        let line = Annot { class: 0, kind: Kind::Polyline, pts: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]] };
+        let line = Annot { hidden: false, class: 0, kind: Kind::Polyline, pts: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]] };
         assert_eq!(label_anchor(&line, &[]), Some([10.0, 0.0]));
         // concave "U": the centroid is in the notch, so the tag goes into a triangle instead
         let u = Annot {
+            hidden: false,
             class: 0,
             kind: Kind::Polygon,
             pts: vec![[0.0, 0.0], [3.0, 0.0], [3.0, 8.0], [7.0, 8.0], [7.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
@@ -3792,7 +4077,7 @@ mod label_tests {
         let ip: Vec<Pos2> = u.pts.iter().map(|q| Pos2::new(q[0], q[1])).collect();
         let a = label_anchor(&u, &triangulate(&ip)).unwrap();
         assert!(point_in_polygon(a, &u.pts), "{a:?}");
-        let b = Annot { class: 0, kind: Kind::BBox, pts: vec![[0.0, 0.0], [5.0, 5.0]] };
+        let b = Annot { hidden: false, class: 0, kind: Kind::BBox, pts: vec![[0.0, 0.0], [5.0, 5.0]] };
         assert_eq!(label_anchor(&b, &[]), None);
     }
 }

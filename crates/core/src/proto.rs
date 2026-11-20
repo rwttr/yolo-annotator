@@ -257,9 +257,9 @@ impl Project {
             let cl = |p: [f32; 2]| [p[0].clamp(0.0, w as f32), p[1].clamp(0.0, h as f32)];
             out.push(match (&d.polygon, seg) {
                 (Some(p), true) if p.len() >= 3 => {
-                    Annot { class, kind: Kind::Polygon, pts: p.iter().map(|q| cl(*q)).collect() }
+                    Annot { hidden: false, class, kind: Kind::Polygon, pts: p.iter().map(|q| cl(*q)).collect() }
                 }
-                _ => Annot { class, kind: Kind::BBox, pts: vec![cl([d.bbox[0], d.bbox[1]]), cl([d.bbox[2], d.bbox[3]])] },
+                _ => Annot { hidden: false, class, kind: Kind::BBox, pts: vec![cl([d.bbox[0], d.bbox[1]]), cl([d.bbox[2], d.bbox[3]])] },
             });
         }
         out

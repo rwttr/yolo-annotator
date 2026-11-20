@@ -89,7 +89,7 @@ dataset folder (`labels\`, `annotations.json`), never into the program folder.
    | **Box (B)** | drag a rectangle |
    | **Polygon (P)** | click points; click the first point, double-click, right-click or Enter to close |
    | **Polyline (L)** | click points; double-click, right-click or Enter to finish |
-   | **Select / Edit (V)** | click inside a shape to select it, or click one of its points to select just that point (amber dot); drag points or the whole shape; **Del deletes the selection**: the point if one is selected (press again to keep removing points), otherwise the whole shape; Esc goes from point back to shape |
+   | **Select / Edit (V)** | click inside a shape to select it, or click one of its points to select just that point (amber dot); drag points or the whole shape; **Del (or Backspace, e.g. on a Mac) deletes the selection**: the point if one is selected (press again to keep removing points), otherwise the whole shape; Esc goes from point back to shape |
    | **Points (E)** | edit the points of the selected polygon / polyline (e.g. a Magic result): click or drag an edge to add a point (a **+** marks where), right-click a point (red ring) or hover + Backspace to remove it, drag a point to move it, drop a point onto its neighbour to merge the two; click another shape to edit that one |
    | **Magic (M)** | AI (SAM 2.1): click an object, or drag a box around it, to get its polygon; Enter or double-click accepts it |
 
@@ -106,12 +106,26 @@ dataset folder (`labels\`, `annotations.json`), never into the program folder.
    is written as soon as you finish each edit (the status bar shows the file). No Save needed.
 5. When done: **Export** (Ctrl+E) makes a train/val split ready for training.
 
-The top bar, left to right: **Open · Save · Export** | the toolbox | **◀ ▶** previous/next image, **Fit**, **Undo**, **Auto** (auto-label) | label format and polyline width. Hover any button for its name and shortcut.
+The top bar, left to right: the dataset-pane toggle | **Open · Save · Export** | the toolbox | **◀ ▶** previous/next image, **Fit**, **Undo**, **Auto** (auto-label) | label format and polyline width | the tools-pane toggle. Hover any button for its name and shortcut.
+The two side panes can be hidden for more image space: the toggle buttons at either end of the top bar, or **[** (dataset pane) and **]** (tools pane). The app remembers your choice.
 **About** is under **Help** in the right panel.
 
 Mouse wheel zooms around the cursor. Middle-drag or Space+drag pans; in Select mode
 you can also drag an empty area to pan. Keys 1–9 pick the class (and recolor the
-selected shape). Ctrl+Z undoes, Ctrl+S saves, F fits the image to the window.
+selected shape). Ctrl+S saves, F fits the image to the window.
+
+**Undo (Ctrl+Z)** goes back one step at a time. While you are drawing a polygon or polyline it
+removes the last point you placed, one point per press. Right after you close a polygon (or finish
+a polyline), Ctrl+Z opens it again with all its points, so you can keep taking points back; Enter
+closes it again, Esc drops it. In the Magic tool, Ctrl+Z removes the last prompt point.
+
+**Hide shapes:** in *Objects in this image* (right pane), the eye next to each object hides or
+shows it on the image, and the eye by the heading (or **H**) hides / shows all of them. Each image
+keeps its own setting while the app is open. Hidden shapes are only hidden from view. They are
+still saved and exported, and cannot be selected on the image until shown again. Clicking a hidden
+object in the list shows it again.
+**Hold Tab** to see only the selected shape for a moment (every other shape and its class name
+disappear); release Tab and they are back.
 
 ## Lab server: annotate together in the browser
 
@@ -147,7 +161,7 @@ or bookmark `http://172.30.243.125:8080/?user=YourName`. Then work as in the des
 | What | How it works |
 |---|---|
 | Two people, one image | The first person to open an image edits it. Everyone else sees it **view only** with a banner, and a 🔒 *name* next to it in the image list. It becomes editable when that person moves on. |
-| Saving | Every finished edit is saved on the server right away. The others see the change live. The status bar shows ✔ Saved, plus your name and how many people are online. |
+| Saving | Every finished edit is saved on the server right away. The others see the change live. The status bar shows ✔ Saved, plus your name and how many people are online. Click *N online* (or press **U**) to open a list of who is online and which image each person has open. Click it again (or press U) to close the list. |
 | Classes | Adding, renaming or deleting a class, and changing the label format or polyline width, apply to everyone, in the same order. |
 | Magic tool / Auto-label | They run on the server's GPU. YOLO models are the `.onnx` files in the server's `models\yolo` folder. AI settings apply to everyone. |
 | Export | Written to the `exports` folder next to the server exe, under the name you type. |
@@ -180,13 +194,15 @@ Uses Meta's **SAM 2.1** (Segment Anything 2.1, Apache-2.0).
 2. **Click the object.** Its outline appears as a dashed polygon.
    * Click more spots to **add** missed parts; **right-click** to **remove** wrong parts.
    * Or **drag a box** around the object.
-   * **Backspace** removes the last point, **Esc** starts over.
+   * **Backspace** or **Ctrl+Z** removes the last point, **Esc** starts over.
 3. **Enter** or **double-click** accepts it, with the current class. The polygon is selected:
    drag its points to fine-tune, or switch to the Selector (V).
 
 In *Detection* format the Magic tool gives a box instead of a polygon.
 The **Detail** slider (AI assist panel) sets how closely the polygon follows the edge
-(smaller = more points).
+(smaller = more points). It is one setting for all images: it stays the same when you move to
+another frame. The desktop app remembers it between runs. On the lab server it is shared by
+everyone and kept until the server restarts.
 
 ### Auto-label with your own YOLO model
 

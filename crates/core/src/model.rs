@@ -32,6 +32,9 @@ pub struct Annot {
     pub class: usize,
     pub kind: Kind,
     pub pts: Vec<[f32; 2]>,
+    /// view only: not drawn on the canvas (still saved and exported). Never written to disk.
+    #[serde(skip)]
+    pub hidden: bool,
 }
 
 impl Annot {
@@ -516,6 +519,7 @@ pub fn parse_yolo(text: &str, w: u32, h: u32) -> Vec<Annot> {
         if v.len() == 5 {
             let (x, y, bw, bh) = (v[1] * w, v[2] * h, v[3] * w, v[4] * h);
             out.push(Annot {
+                hidden: false,
                 class,
                 kind: Kind::BBox,
                 pts: vec![
@@ -537,12 +541,14 @@ pub fn parse_yolo(text: &str, w: u32, h: u32) -> Vec<Annot> {
             if is_rect {
                 let b = bounds_of(&pts);
                 out.push(Annot {
+                    hidden: false,
                     class,
                     kind: Kind::BBox,
                     pts: vec![[b[0], b[1]], [b[2], b[3]]],
                 });
             } else {
                 out.push(Annot {
+                    hidden: false,
                     class,
                     kind: Kind::Polygon,
                     pts,
@@ -949,8 +955,8 @@ mod tests {
             width: 200,
             height: 100,
             shapes: vec![
-                Annot { class: 0, kind: Kind::BBox, pts: vec![[20.0, 10.0], [60.0, 50.0]] },
-                Annot { class: 1, kind: Kind::Polygon, pts: vec![[10.0, 10.0], [100.0, 20.0], [50.0, 90.0]] },
+                Annot { hidden: false, class: 0, kind: Kind::BBox, pts: vec![[20.0, 10.0], [60.0, 50.0]] },
+                Annot { hidden: false, class: 1, kind: Kind::Polygon, pts: vec![[10.0, 10.0], [100.0, 20.0], [50.0, 90.0]] },
             ],
         };
         for mode in [ExportMode::Segment, ExportMode::Detect] {
@@ -967,7 +973,7 @@ mod tests {
 
     #[test]
     fn box_edge_handles() {
-        let mut a = Annot { class: 0, kind: Kind::BBox, pts: vec![[10.0, 10.0], [50.0, 30.0]] };
+        let mut a = Annot { hidden: false, class: 0, kind: Kind::BBox, pts: vec![[10.0, 10.0], [50.0, 30.0]] };
         assert_eq!(a.handles().len(), 8);
         a.set_handle(5, [80.0, 999.0]); // right edge: only x changes
         a.set_handle(4, [999.0, 5.0]); // top edge: only y changes
@@ -1000,7 +1006,7 @@ mod tests {
             let f = format!("im{i}.jpg");
             fs::write(img_dir.join(&f), b"x").unwrap();
             p.images.insert(f.clone(), ImageAnn { width: 10, height: 10, shapes: vec![
-                Annot { class: 0, kind: Kind::BBox, pts: vec![[1.0, 1.0], [5.0, 5.0]] }] });
+                Annot { hidden: false, class: 0, kind: Kind::BBox, pts: vec![[1.0, 1.0], [5.0, 5.0]] }] });
             files.push(f);
         }
         files.push("unlabeled.jpg".into());
